@@ -129,7 +129,7 @@ services:
       victoriametrics:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "grafana", "--version"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
       <<: *default_healthcheck
 
   # vector is logs collector. It collects logs according to vector.yml
@@ -177,7 +177,7 @@ services:
     user: root
     userns_mode: "host"
     healthcheck:
-      #test: ["CMD", "/vmauth-prod", "-version"]
+      test: ["CMD", "/usr/bin/vector", "validate", "--skip-healthchecks"]
       <<: *default_healthcheck
 
   #  VictoriaLogs instance, a single process responsible for
@@ -215,7 +215,7 @@ services:
       - frontend
     #  - backend
     healthcheck:
-      test: ["CMD", "/victoria-logs-prod", "-version"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9428/health"]
       <<: *default_healthcheck
 
   # VictoriaMetrics instance, a single process responsible for
@@ -256,7 +256,7 @@ services:
       - frontend
     #  - backend
     healthcheck:
-      test: ["CMD", "/victoria-metrics-prod", "-version"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8428/health"]
       <<: *default_healthcheck
 
 #  # vmauth is a router and balancer for HTTP requests.
@@ -299,8 +299,8 @@ services:
         condition: service_healthy
       victoriametrics:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "/vmauth-prod", "-version"]
+    healthcheck: 
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8427/health"]
       <<: *default_healthcheck
 
 #  # vmalert executes alerting and recording rules according to the given rule type.
@@ -358,7 +358,7 @@ services:
       victorialogs:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/vmalert-prod", "-version"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8880/health"]
       <<: *default_healthcheck
 #
 #  # alertmanager receives alerting notifications from vmalert
@@ -396,5 +396,5 @@ services:
       - frontend
     #  - backend
     healthcheck:
-      test: ["CMD", "/bin/alertmanager", "--version"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9093/-/healthy"]
       <<: *default_healthcheck
