@@ -1,122 +1,400 @@
+###############################################################################
+# Start of default configs
+###############################################################################
+
+  #####################################
+  # Container base defaults
+  #####################################
+  # Max Usage Limits
+x-limits: &limits
+  mem_limit: ${MEM_LIMIT:-2G} # Override per container if necessary
+  memswap_limit: ${MEM_SWAP_LIMIT:-2.5G}
+  mem_reservation: ${MEM_RESERVATION:-64M}
+  pids_limit: ${PIDS_LIMIT:-200}
+  cpus: ${CPUS_LIMIT:-2} # Set below the total number of cores, for example 3.5 for 4 cores
+
+  # Restart Settings
+x-restart: &restart
+  stop_grace_period: ${RESTART_GRACE:-1m}
+  restart: ${RESTART_MODE:-unless-stopped}
+
+  # Configure security
+x-security: &security
+  security_opt:
+   - no-new-privileges=${NO_NEW_PRIVILEGES:-true}
+
+  # Configure User
+x-user: &user
+  user: ${PUID:-1000}:${PGID:-1000}
+
+  # Configure Logging
+x-logging: &logging
+  logging:
+    options:
+      max-size: ${LOG_MAX_SIZE:-10m}
+      max-file: ${LOG_MAX_FILE:-3}
+
+  ## All base defaults in one
+x-base: &default-base
+  <<: [*limits, *restart, *security, *user, *logging]
+
+  #####################################
+  # Container healthcheck defaults
+  #####################################
+x-healthcheck: &default_healthcheck
+  interval: ${HEALTH_INTERVAL:-60s}
+  timeout: ${HEALTH_TIMEOUT:-10s}
+  retries: ${HEALTH_RETRIES:-5}
+  start_period: ${HEALTH_START:-10s}
+  
+  #####################################
+  # Container environment defaults
+  #####################################
+x-environment-tz: &environment_tz
+  TZ: ${TZ:-America/Chicago}
+
+x-environment-user: &environment_user
+  PUID: ${PUID:-1000}
+  PGID: ${PGID:-1000}
+
+  ## All environment defaults in one
+x-environment: &default_environment
+  <<: [*environment_tz, *environment_user]
+
+###############################################################################
+# Start of stack config
+###############################################################################
+# Project Name
+name: ${PROJECT_NAME}
+
+networks:
+  proxy:
+    name: ${PROXY_NETWORK}
+    external: true
+  frontend:
+    name: ${PROJECT_NAME}_frontend
+    internal: false
+    driver_opts:
+      encrypted: "true"
+  backend:
+    name: ${PROJECT_NAME}_backend
+    internal: true
+    driver_opts:
+      encrypted: "true"
+#  socket_proxy:
+#    name: ${PROJECT_NAME}_socket_proxy
+#    internal: true
+#    driver_opts:
+#      encrypted: "true"
+
 services:
   # Grafana instance configured with VictoriaLogs as datasource
-#  grafana:
-#    image: grafana/grafana:12.2.1
-#    depends_on:
-#      - "victoriametrics"
-#      - "victorialogs"
-#    ports:
-#      - 3000:3000
-#    volumes:
-#      - grafanadata:/var/lib/grafana
-#      - ./provisioning/datasources/victoriametrics-logs-datasource/single.yml:/etc/grafana/provisioning/datasources/single.yml
-#      - ./provisioning/dashboards:/etc/grafana/provisioning/dashboards
-#      - ./../../dashboards/victorialogs.json:/var/lib/grafana/dashboards/vl.json
-#    environment:
-#      - "GF_INSTALL_PLUGINS=victoriametrics-logs-datasource"
-#    restart: always
+  grafana:
+    <<: [*limits, *restart, *security, *user, *logging]
+    image: grafana/grafana:12.2.1
+    hostname: ${PROJECT_NAME}-grafana.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-grafana
+    ports:
+      - 3000:3000
+    environment:
+      <<: [*environment_tz, *environment_user]
+      GF_INSTALL_PLUGINS: victoriametrics-logs-datasource
+    volumes:
+      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/grafana-data:/var/lib/grafana
+      - ./grafana-config/single.yml:/etc/grafana/provisioning/datasources/single.yml
+      - ./grafana-config/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana-config/victorialogs.json:/var/lib/grafana/dashboards/vl.json
+    labels: ## Traefik Labels
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+        ## HTTP Routers
+      - "traefik.http.routers.$PROJECT_NAME-grafana-rtr.rule=
+        Host(`${SERVICE_NAME}-grafana.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-grafana.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-grafana.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-grafana.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        ## Middlewares
+      - "traefik.http.routers.$PROJECT_NAME-grafana-rtr.middlewares=chain-no-auth@file"
+        ## HTTP Services
+      - "traefik.http.services.$PROJECT_NAME-grafana-svc.loadbalancer.server.port=3000"
+      ## Komodo Labels
+      - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
+    networks:
+    #  - proxy
+      - frontend
+    #  - backend
+    depends_on:
+      victorialogs:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "grafana", "--version"]
+      <<: *default_healthcheck
 
   # vector is logs collector. It collects logs according to vector.yml
   # and forwards them to VictoriaLogs
-#  vector:
-#    image: docker.io/timberio/vector:0.46.X-distroless-libc
-#    volumes:
-#      - type: bind
-#        source: /var/run/docker.sock
-#        target: /var/run/docker.sock
-#      - type: bind
-#        source: /var/lib/docker
-#        target: /var/lib/docker
-#      - ./vector-vl-single.yml:/etc/vector/vector.yaml:ro
-#    depends_on: [victorialogs]
-#    ports:
-#      - "8686:8686"
-#    user: root
+  vector:
+    #<<: [*limits, *restart, *security, *user, *logging]
+    <<: [*limits, *restart, *security, *logging]
+    image: docker.io/timberio/vector:0.46.X-distroless-libc
+    hostname: ${PROJECT_NAME}-vector.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-vector
+    ports:
+      - "8686:8686"
+    environment:
+      <<: [*environment_tz, *environment_user]
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: /var/lib/docker
+        target: /var/lib/docker
+      - ./vector-config/vector-vl.yml:/etc/vector/vector.yaml:ro
+    labels: ## Traefik Labels
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+        ## HTTP Routers
+      - "traefik.http.routers.$PROJECT_NAME-vector-rtr.rule=
+        Host(`${SERVICE_NAME}-vector.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-vector.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-vector.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-vector.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        ## Middlewares
+      - "traefik.http.routers.$PROJECT_NAME-vector-rtr.middlewares=chain-no-auth@file"
+        ## HTTP Services
+      - "traefik.http.services.$PROJECT_NAME-vector-svc.loadbalancer.server.port=8686"
+      ## Komodo Labels
+      - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
+    networks:
+      - proxy
+      - frontend
+    #  - backend
+    depends_on:
+      victorialogs:
+        condition: service_healthy
+    user: root
+    userns_mode: "host"
+    healthcheck:
+      #test: ["CMD", "/vmauth-prod", "-version"]
+      <<: *default_healthcheck
 
   #  VictoriaLogs instance, a single process responsible for
   #  storing logs and serving read queries.
-#  victorialogs:
-#    image: victoriametrics/victoria-logs:v1.43.1
-#    ports:
-#      - "9428:9428"
-#    command:
-#      - "--storageDataPath=/vlogs"
-#    volumes:
-#      - vldata:/vlogs
+  victorialogs:
+    <<: [*limits, *restart, *security, *user, *logging]
+    image: victoriametrics/victoria-logs:v1.43.1
+    hostname: ${PROJECT_NAME}-logs.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-logs
+    command:
+      - "--storageDataPath=/vlogs"
+    ports:
+      - "9428:9428"
+    environment:
+      <<: [*environment_tz, *environment_user]
+    volumes:
+      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/victorialogs-data:/vlogs
+    labels: ## Traefik Labels
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+        ## HTTP Routers
+      - "traefik.http.routers.$PROJECT_NAME-logs-rtr.rule=
+        Host(`${SERVICE_NAME}-logs.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-logs.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-logs.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-logs.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        ## Middlewares
+      - "traefik.http.routers.$PROJECT_NAME-logs-rtr.middlewares=chain-no-auth@file"
+        ## HTTP Services
+      - "traefik.http.services.$PROJECT_NAME-logs-svc.loadbalancer.server.port=9428"
+      ## Komodo Labels
+      - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
+    networks:
+      - proxy
+      - frontend
+    #  - backend
+    healthcheck:
+      test: ["CMD", "/victoria-logs-prod", "-version"]
+      <<: *default_healthcheck
 
   # VictoriaMetrics instance, a single process responsible for
   # scraping, storing metrics and serve read requests.
-#  victoriametrics:
-#    image: victoriametrics/victoria-metrics:v1.129.1
-#    ports:
-#      - "8428:8428"
-#    volumes:
-#      - vmdata:/storage
-#      - ./prometheus-vl-single.yml:/etc/prometheus/prometheus.yml
-#    command:
-#      - "--storageDataPath=/storage"
-#      - "--promscrape.config=/etc/prometheus/prometheus.yml"
-#      - "--vmalert.proxyURL=http://vmalert:8880"
-#    restart: always
+  victoriametrics:
+    <<: [*limits, *restart, *security, *user, *logging]
+    image: victoriametrics/victoria-metrics:v1.129.1
+    hostname: ${PROJECT_NAME}-metrics.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-metrics
+    command:
+      - "--storageDataPath=/storage"
+      - "--promscrape.config=/etc/prometheus/prometheus.yml"
+      - "--vmalert.proxyURL=http://vmalert:8880"
+    ports:
+      - "8428:8428"
+    environment:
+      <<: [*environment_tz, *environment_user]
+    volumes:
+      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/victoriametrics-data:/storage
+      - ./victoriametrics-config/prometheus-vl.yml:/etc/prometheus/prometheus.yml
+    labels: ## Traefik Labels
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+        ## HTTP Routers
+      - "traefik.http.routers.$PROJECT_NAME-metrics-rtr.rule=
+        Host(`${SERVICE_NAME}-metrics.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-metrics.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-metrics.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-metrics.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        ## Middlewares
+      - "traefik.http.routers.$PROJECT_NAME-metrics-rtr.middlewares=chain-no-auth@file"
+        ## HTTP Services
+      - "traefik.http.services.$PROJECT_NAME-metrics-svc.loadbalancer.server.port=8428"
+      ## Komodo Labels
+      - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
+    networks:
+      - proxy
+      - frontend
+    #  - backend
+    healthcheck:
+      test: ["CMD", "/victoria-metrics-prod", "-version"]
+      <<: *default_healthcheck
 
 #  # vmauth is a router and balancer for HTTP requests.
 #  # It proxies query requests from vmalert to either VictoriaMetrics or VictoriaLogs,
 #  # depending on the requested path.
-#  vmauth:
-#    image: victoriametrics/vmauth:v1.129.1
-#    depends_on:
-#      - "victoriametrics"
-#      - "victorialogs"
-#    volumes:
-#      - ./auth-vl-single.yml:/etc/auth.yml
-#    command:
-#      - "--auth.config=/etc/auth.yml"
-#    ports:
-#      - 8427:8427
-#    restart: always
-#
+  vmauth:
+    <<: [*limits, *restart, *security, *user, *logging]
+    image: victoriametrics/vmauth:v1.129.1
+    hostname: ${PROJECT_NAME}-vmauth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-vmauth
+    command:
+      - "--auth.config=/etc/auth.yml"
+    ports:
+      - 8427:8427
+    environment:
+      <<: [*environment_tz, *environment_user]
+    volumes:
+      - ./vmauth-config/auth-vl.yml:/etc/auth.yml 
+    labels: ## Traefik Labels
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+        ## HTTP Routers
+      - "traefik.http.routers.$PROJECT_NAME-vmauth-rtr.rule=
+        Host(`${SERVICE_NAME}-vmauth.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-vmauth.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-vmauth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-vmauth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        ## Middlewares
+      - "traefik.http.routers.$PROJECT_NAME-vmauth-rtr.middlewares=chain-no-auth@file"
+        ## HTTP Services
+      - "traefik.http.services.$PROJECT_NAME-vmauth-svc.loadbalancer.server.port=8427"
+      ## Komodo Labels
+      - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
+    networks:
+      - proxy
+      - frontend
+    #  - backend
+    depends_on:
+      victorialogs:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/vmauth-prod", "-version"]
+      <<: *default_healthcheck
+
 #  # vmalert executes alerting and recording rules according to the given rule type.
-#  vmalert:
-#    image: victoriametrics/vmalert:v1.129.1
-#    depends_on:
-#      - "vmauth"
-#      - "alertmanager"
-#      - "victoriametrics"
-#    ports:
-#      - 8880:8880
-#    volumes:
-#      - ./rules/alerts-vlogs.yml:/etc/alerts/vlogs.yml
-#      - ./rules/alerts-health.yml:/etc/alerts/alerts-health.yml
-#      # vlogs rule
-#      - ./vlogs-example-alerts.yml:/etc/alerts/vlogs-example-alerts.yml
-#    command:
-#      # it evaluates data against VictoriaMetrics and VictoriaLogs
-#      # vmauth routes queries to corresponding datasource based on API path
-#      - "--datasource.url=http://vmauth:8427/"
-#      # results of alerting and recording rules are persisted to VictoriaMetrics only
-#      - "--remoteWrite.url=http://victoriametrics:8428/"
-#      # alerts state is restored from VictoriaMetrics on restarts
-#      - "--remoteRead.url=http://victoriametrics:8428/"
-#      - "--notifier.url=http://alertmanager:9093/"
-#      - "--rule=/etc/alerts/*.yml"
-#      # display source of alerts in grafana
-#      - "--external.url=http://127.0.0.1:3000" #grafana outside container
-#      - '--external.alert.source=explore?orgId=1&left={"datasource":"{{ if eq .Type "vlogs" }}VictoriaLogs{{ else }}VictoriaMetrics{{ end }}","queries":[{"expr":{{.Expr|jsonEscape|queryEscape}},"refId":"A"}],"range":{"from":"{{ .ActiveAt.UnixMilli }}","to":"now"}}'
-#    restart: always
+  vmalert:
+    <<: [*limits, *restart, *security, *user, *logging]
+    image: victoriametrics/vmalert:v1.129.1
+    hostname: ${PROJECT_NAME}-vmalert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-vmalert
+    command:
+      # it evaluates data against VictoriaMetrics and VictoriaLogs
+      # vmauth routes queries to corresponding datasource based on API path
+      - "--datasource.url=http://vmauth:8427/"
+      # results of alerting and recording rules are persisted to VictoriaMetrics only
+      - "--remoteWrite.url=http://victoriametrics:8428/"
+      # alerts state is restored from VictoriaMetrics on restarts
+      - "--remoteRead.url=http://victoriametrics:8428/"
+      - "--notifier.url=http://alertmanager:9093/"
+      - "--rule=/etc/alerts/*.yml"
+      # display source of alerts in grafana
+      - "--external.url=http://127.0.0.1:3000" #grafana outside container
+      - '--external.alert.source=explore?orgId=1&left={"datasource":"{{ if eq .Type "vlogs" }}VictoriaLogs{{ else }}VictoriaMetrics{{ end }}","queries":[{"expr":{{.Expr|jsonEscape|queryEscape}},"refId":"A"}],"range":{"from":"{{ .ActiveAt.UnixMilli }}","to":"now"}}'
+    ports:
+      - 8880:8880
+    environment:
+      <<: [*environment_tz, *environment_user]
+    volumes:
+      - ./vmalert-config/alerts-vlogs.yml:/etc/alerts/vlogs.yml
+      - ./vmalert-config/alerts-health.yml:/etc/alerts/alerts-health.yml
+      # vlogs rule
+      - ./vmalert-config/vlogs-example-alerts.yml:/etc/alerts/vlogs-example-alerts.yaml
+    labels: ## Traefik Labels
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+        ## HTTP Routers
+      - "traefik.http.routers.$PROJECT_NAME-vmalert-rtr.rule=
+        Host(`${SERVICE_NAME}-vmalert.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-vmalert.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-vmalert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-vmalert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        ## Middlewares
+      - "traefik.http.routers.$PROJECT_NAME-vmalert-rtr.middlewares=chain-no-auth@file"
+        ## HTTP Services
+      - "traefik.http.services.$PROJECT_NAME-vmalert-svc.loadbalancer.server.port=8880"
+      ## Komodo Labels
+      - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
+    networks:
+      - proxy
+      - frontend
+    #  - backend
+    depends_on:
+      vmauth:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
+      victorialogs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/vmalert-prod", "-version"]
+      <<: *default_healthcheck
 #
 #  # alertmanager receives alerting notifications from vmalert
 #  # and distributes them according to --config.file.
-#  alertmanager:
-#    image: prom/alertmanager:v0.28.1
-#    volumes:
-#      - ./alertmanager.yml:/config/alertmanager.yml
-#    command:
-#      - "--config.file=/config/alertmanager.yml"
-#    ports:
-#      - 9093:9093
-#    restart: always
-
-volumes:
-  vmdata: {}
-  vldata: {}
-  grafanadata: {}
+  alertmanager:
+    <<: [*limits, *restart, *security, *logging]
+    image: prom/alertmanager:v0.28.1
+    hostname: ${PROJECT_NAME}-alertmanager.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-alertmanager
+    command:
+      - "--config.file=/config/alertmanager.yml"
+    ports:
+      - 9093:9093
+    environment:
+      <<: [*environment_tz, *environment_user]
+    volumes:
+      - ./alertmanager-config/alertmanager.yml:/config/alertmanager.yml
+    labels: ## Traefik Labels
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+        ## HTTP Routers
+      - "traefik.http.routers.$PROJECT_NAME-alertmanager-rtr.rule=
+        Host(`${SERVICE_NAME}-alertmanager.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-alertmanager.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-alertmanager.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-alertmanager.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        ## Middlewares
+      - "traefik.http.routers.$PROJECT_NAME-alertmanager-rtr.middlewares=chain-no-auth@file"
+        ## HTTP Services
+      - "traefik.http.services.$PROJECT_NAME-alertmanager-svc.loadbalancer.server.port=9093"
+      ## Komodo Labels
+      - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
+    networks:
+      - proxy
+      - frontend
+    #  - backend
+    healthcheck:
+      test: ["CMD", "/bin/alertmanager", "--version"]
+      <<: *default_healthcheck
