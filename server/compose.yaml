@@ -87,97 +87,52 @@ networks:
 #    driver_opts:
 #      encrypted: "true"
 
-services:
-  # Grafana instance configured with VictoriaLogs as datasource
-  grafana:
-    <<: [*limits, *restart, *security, *user, *logging]
-    image: grafana/grafana:12.2.1
-    hostname: ${PROJECT_NAME}-grafana.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
-    container_name: ${PROJECT_NAME}-grafana
-    ports:
-      - 3000:3000
-    environment:
-      <<: [*environment_tz, *environment_user]
-      GF_INSTALL_PLUGINS: victoriametrics-logs-datasource
-    volumes:
-      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/grafana-data:/var/lib/grafana
-      - ./grafana-config/single.yml:/etc/grafana/provisioning/datasources/single.yml
-      - ./grafana-config/dashboards:/etc/grafana/provisioning/dashboards
-      - ./grafana-config/victorialogs.json:/var/lib/grafana/dashboards/vl.json
-    labels: ## Traefik Labels
-      - "traefik.enable=true"
-      - "traefik.docker.network=${PROXY_NETWORK}"
-        ## HTTP Routers
-      - "traefik.http.routers.$PROJECT_NAME-grafana-rtr.rule=
-        Host(`${SERVICE_NAME}-grafana.${DOMAIN_NAME}`) ||
-        Host(`${SERVICE_NAME}-grafana.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${SERVICE_NAME}-grafana.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${PROJECT_NAME}-grafana.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
-        ## Middlewares
-      - "traefik.http.routers.$PROJECT_NAME-grafana-rtr.middlewares=chain-no-auth@file"
-        ## HTTP Services
-      - "traefik.http.services.$PROJECT_NAME-grafana-svc.loadbalancer.server.port=3000"
-      ## Komodo Labels
-      - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
-    networks:
-    #  - proxy
-      - frontend
-    #  - backend
-    depends_on:
-      victorialogs:
-        condition: service_healthy
-      victoriametrics:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
-      <<: *default_healthcheck
+# Include Agent services with server
+include:
+  - ../agent/compose.yaml
 
-  # vector is logs collector. It collects logs according to vector.yml
-  # and forwards them to VictoriaLogs
-  vector:
-    #<<: [*limits, *restart, *security, *user, *logging]
-    <<: [*limits, *restart, *security, *logging]
-    image: docker.io/timberio/vector:0.46.X-distroless-libc
-    hostname: ${PROJECT_NAME}-vector.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
-    container_name: ${PROJECT_NAME}-vector
+services:
+  # VictoriaMetrics instance, a single process responsible for
+  # scraping, storing metrics and serve read requests.
+  victoriametrics:
+    <<: [*limits, *restart, *security, *user, *logging]
+    image: victoriametrics/victoria-metrics:v1.129.1
+    hostname: victoriametrics.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-metrics
+    command:
+      - "--storageDataPath=/storage"
+      - "--promscrape.config=/etc/prometheus/prometheus.yml"
+      - "--vmalert.proxyURL=http://vmalert:8880"
     ports:
-      - "8686:8686"
+      - "8428:8428"
     environment:
       <<: [*environment_tz, *environment_user]
     volumes:
-      - type: bind
-        source: /var/run/docker.sock
-        target: /var/run/docker.sock
-      - type: bind
-        source: /var/lib/docker
-        target: /var/lib/docker
-      - ./vector-config/vector-vl.yml:/etc/vector/vector.yaml:ro
+      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/victoriametrics-data:/storage
+      - ./victoriametrics-config/prometheus-vl-single.yml:/etc/prometheus/prometheus.yml
     labels: ## Traefik Labels
       - "traefik.enable=true"
       - "traefik.docker.network=${PROXY_NETWORK}"
         ## HTTP Routers
-      - "traefik.http.routers.$PROJECT_NAME-vector-rtr.rule=
-        Host(`${SERVICE_NAME}-vector.${DOMAIN_NAME}`) ||
-        Host(`${SERVICE_NAME}-vector.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${SERVICE_NAME}-vector.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${PROJECT_NAME}-vector.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+      - "traefik.http.routers.$PROJECT_NAME-rtr.rule=
+        Host(`${SERVICE_NAME}-metrics.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-metrics.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-metrics.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}.${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
         ## Middlewares
-      - "traefik.http.routers.$PROJECT_NAME-vector-rtr.middlewares=chain-no-auth@file"
+      - "traefik.http.routers.$PROJECT_NAME-rtr.middlewares=chain-no-auth@file"
         ## HTTP Services
-      - "traefik.http.services.$PROJECT_NAME-vector-svc.loadbalancer.server.port=8686"
+      - "traefik.http.services.$PROJECT_NAME-svc.loadbalancer.server.port=8428"
       ## Komodo Labels
       - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
     networks:
       - proxy
-      - frontend
-    #  - backend
-    depends_on:
-      victorialogs:
-        condition: service_healthy
-    user: root
-    userns_mode: "host"
+    #  - frontend
+      - backend
     healthcheck:
-      test: ["CMD", "/usr/bin/vector", "validate", "--skip-healthchecks"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8428/health"]
       <<: *default_healthcheck
 
   #  VictoriaLogs instance, a single process responsible for
@@ -185,7 +140,7 @@ services:
   victorialogs:
     <<: [*limits, *restart, *security, *user, *logging]
     image: victoriametrics/victoria-logs:v1.43.1
-    hostname: ${PROJECT_NAME}-logs.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    hostname: victorialogs.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-logs
     command:
       - "--storageDataPath=/vlogs"
@@ -199,64 +154,65 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=${PROXY_NETWORK}"
         ## HTTP Routers
-      - "traefik.http.routers.$PROJECT_NAME-logs-rtr.rule=
+      - "traefik.http.routers.victorialogs-rtr.rule=
         Host(`${SERVICE_NAME}-logs.${DOMAIN_NAME}`) ||
         Host(`${SERVICE_NAME}-logs.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
         Host(`${SERVICE_NAME}-logs.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${PROJECT_NAME}-logs.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        Host(`victorialogs.${DOMAIN_NAME}`) ||
+        Host(`victorialogs.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`victorialogs.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
         ## Middlewares
-      - "traefik.http.routers.$PROJECT_NAME-logs-rtr.middlewares=chain-no-auth@file"
+      - "traefik.http.routers.victorialogs-rtr.middlewares=chain-no-auth@file"
         ## HTTP Services
-      - "traefik.http.services.$PROJECT_NAME-logs-svc.loadbalancer.server.port=9428"
+      - "traefik.http.services.victorialogs-svc.loadbalancer.server.port=9428"
       ## Komodo Labels
       - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
     networks:
       - proxy
-      - frontend
-    #  - backend
+    #  - frontend
+      - backend
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9428/health"]
       <<: *default_healthcheck
 
-  # VictoriaMetrics instance, a single process responsible for
-  # scraping, storing metrics and serve read requests.
-  victoriametrics:
+  #  VictoriaTraces instance, a single process responsible for
+  #  storing trace span and serving read queries.
+  victoriatraces:
     <<: [*limits, *restart, *security, *user, *logging]
-    image: victoriametrics/victoria-metrics:v1.129.1
-    hostname: ${PROJECT_NAME}-metrics.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
-    container_name: ${PROJECT_NAME}-metrics
+    image: 'docker.io/victoriametrics/victoria-traces:latest'
+    hostname: victoriatraces.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-traces
     command:
-      - "--storageDataPath=/storage"
-      - "--promscrape.config=/etc/prometheus/prometheus.yml"
-      - "--vmalert.proxyURL=http://vmalert:8880"
+      - "--storageDataPath=/vtraces"
     ports:
-      - "8428:8428"
+      - "10428:10428"
     environment:
       <<: [*environment_tz, *environment_user]
     volumes:
-      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/victoriametrics-data:/storage
-      - ./victoriametrics-config/prometheus-vl.yml:/etc/prometheus/prometheus.yml
+      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/victoriatraces-data:/vtraces
     labels: ## Traefik Labels
       - "traefik.enable=true"
       - "traefik.docker.network=${PROXY_NETWORK}"
         ## HTTP Routers
-      - "traefik.http.routers.$PROJECT_NAME-metrics-rtr.rule=
-        Host(`${SERVICE_NAME}-metrics.${DOMAIN_NAME}`) ||
-        Host(`${SERVICE_NAME}-metrics.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${SERVICE_NAME}-metrics.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${PROJECT_NAME}-metrics.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+      - "traefik.http.routers.victoriatraces-rtr.rule=
+        Host(`${SERVICE_NAME}-traces.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-traces.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-traces.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`victoriatraces.${DOMAIN_NAME}`) ||
+        Host(`victoriatraces.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`victoriatraces.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
         ## Middlewares
-      - "traefik.http.routers.$PROJECT_NAME-metrics-rtr.middlewares=chain-no-auth@file"
+      - "traefik.http.routers.victoriatraces-rtr.middlewares=chain-no-auth@file"
         ## HTTP Services
-      - "traefik.http.services.$PROJECT_NAME-metrics-svc.loadbalancer.server.port=8428"
+      - "traefik.http.services.victoriatraces-svc.loadbalancer.server.port=10428"
       ## Komodo Labels
       - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
     networks:
       - proxy
-      - frontend
-    #  - backend
+    #  - frontend
+      - backend
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8428/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10428/health"]
       <<: *default_healthcheck
 
 #  # vmauth is a router and balancer for HTTP requests.
@@ -265,25 +221,27 @@ services:
   vmauth:
     <<: [*limits, *restart, *security, *user, *logging]
     image: victoriametrics/vmauth:v1.129.1
-    hostname: ${PROJECT_NAME}-vmauth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    hostname: vmauth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vmauth
     command:
       - "--auth.config=/etc/auth.yml"
+      - "--httpAuth.username=${VMAUTH_USER}"
+      - "--httpAuth.password=${VMAUTH_PASS}"
     ports:
       - 8427:8427
     environment:
       <<: [*environment_tz, *environment_user]
     volumes:
-      - ./vmauth-config/auth-vl.yml:/etc/auth.yml 
+      - ./vmauth-config/auth-vl-single.yml:/etc/auth.yml 
     labels: ## Traefik Labels
       - "traefik.enable=true"
       - "traefik.docker.network=${PROXY_NETWORK}"
         ## HTTP Routers
       - "traefik.http.routers.$PROJECT_NAME-vmauth-rtr.rule=
-        Host(`${SERVICE_NAME}-vmauth.${DOMAIN_NAME}`) ||
-        Host(`${SERVICE_NAME}-vmauth.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${SERVICE_NAME}-vmauth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${PROJECT_NAME}-vmauth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        Host(`${SERVICE_NAME}-auth.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-auth.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-auth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-auth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
         ## Middlewares
       - "traefik.http.routers.$PROJECT_NAME-vmauth-rtr.middlewares=chain-no-auth@file"
         ## HTTP Services
@@ -293,7 +251,7 @@ services:
     networks:
       - proxy
       - frontend
-    #  - backend
+      - backend
     depends_on:
       victorialogs:
         condition: service_healthy
@@ -307,12 +265,14 @@ services:
   vmalert:
     <<: [*limits, *restart, *security, *user, *logging]
     image: victoriametrics/vmalert:v1.129.1
-    hostname: ${PROJECT_NAME}-vmalert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    hostname: vmalert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vmalert
     command:
       # it evaluates data against VictoriaMetrics and VictoriaLogs
       # vmauth routes queries to corresponding datasource based on API path
       - "--datasource.url=http://vmauth:8427/"
+      - "--datasource.basicAuth.username=${VMAUTH_USER}"
+      - "--datasource.basicAuth.password=${VMAUTH_PASS}"
       # results of alerting and recording rules are persisted to VictoriaMetrics only
       - "--remoteWrite.url=http://victoriametrics:8428/"
       # alerts state is restored from VictoriaMetrics on restarts
@@ -327,19 +287,16 @@ services:
     environment:
       <<: [*environment_tz, *environment_user]
     volumes:
-      - ./vmalert-config/alerts-vlogs.yml:/etc/alerts/vlogs.yml
-      - ./vmalert-config/alerts-health.yml:/etc/alerts/alerts-health.yml
-      # vlogs rule
-      - ./vmalert-config/vlogs-example-alerts.yml:/etc/alerts/vlogs-example-alerts.yaml
+      - ./vmalert-config:/etc/alerts:ro
     labels: ## Traefik Labels
       - "traefik.enable=true"
       - "traefik.docker.network=${PROXY_NETWORK}"
         ## HTTP Routers
       - "traefik.http.routers.$PROJECT_NAME-vmalert-rtr.rule=
-        Host(`${SERVICE_NAME}-vmalert.${DOMAIN_NAME}`) ||
-        Host(`${SERVICE_NAME}-vmalert.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${SERVICE_NAME}-vmalert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
-        Host(`${PROJECT_NAME}-vmalert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        Host(`${SERVICE_NAME}-alert.${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-alert.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${SERVICE_NAME}-alert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-alert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
         ## Middlewares
       - "traefik.http.routers.$PROJECT_NAME-vmalert-rtr.middlewares=chain-no-auth@file"
         ## HTTP Services
@@ -348,8 +305,8 @@ services:
       - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
     networks:
       - proxy
-      - frontend
-    #  - backend
+    #  - frontend
+      - backend
     depends_on:
       vmauth:
         condition: service_healthy
@@ -360,13 +317,61 @@ services:
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8880/health"]
       <<: *default_healthcheck
-#
-#  # alertmanager receives alerting notifications from vmalert
-#  # and distributes them according to --config.file.
+
+  # Grafana instance configured with VictoriaLogs as datasource
+  grafana:
+    <<: [*limits, *restart, *security, *user, *logging]
+    image: grafana/grafana:12.2.1
+    hostname: grafana.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-grafana
+    #ports:
+    #  - 3000:3000
+    environment:
+      <<: [*environment_tz, *environment_user]
+      VMAUTH_USER: ${VMAUTH_USER}
+      VMAUTH_PASS: ${VMAUTH_PASS}
+      GF_PLUGINS_PREINSTALL: victoriametrics-logs-datasource, victoriametrics-metrics-datasource
+      GF_INSTALL_PLUGINS: victoriametrics-logs-datasource, victoriametrics-metrics-datasource
+    volumes:
+      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/grafana-data:/var/lib/grafana
+      - ./grafana-config/datasources/victoriametrics.yml:/etc/grafana/provisioning/datasources/victoriametrics.yml
+      - ./grafana-config/provisioning:/etc/grafana/provisioning/dashboards
+      - ./grafana-config/dashboards:/var/lib/grafana/dashboards
+      #- ./grafana-config/dashboards/victorialogs.json:/var/lib/grafana/dashboards/vl.json
+    labels: ## Traefik Labels
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+        ## HTTP Routers
+      - "traefik.http.routers.$PROJECT_NAME-grafana-rtr.rule=
+        Host(`grafana.${DOMAIN_NAME}`) ||
+        Host(`grafana.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`grafana.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-grafana.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+        ## Middlewares
+      - "traefik.http.routers.$PROJECT_NAME-grafana-rtr.middlewares=chain-no-auth@file"
+        ## HTTP Services
+      - "traefik.http.services.$PROJECT_NAME-grafana-svc.loadbalancer.server.port=3000"
+      ## Komodo Labels
+      - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
+    networks:
+      - proxy
+      - frontend # For internet access for dashboard and plugin downlaods, and for external datasources.
+      - backend
+    depends_on:
+      victorialogs:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      <<: *default_healthcheck
+
+  # alertmanager receives alerting notifications from vmalert
+  # and distributes them according to --config.file.
   alertmanager:
     <<: [*limits, *restart, *security, *logging]
     image: prom/alertmanager:v0.28.1
-    hostname: ${PROJECT_NAME}-alertmanager.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    hostname: alertmanager.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-alertmanager
     command:
       - "--config.file=/config/alertmanager.yml"
@@ -393,8 +398,8 @@ services:
       - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
     networks:
       - proxy
-      - frontend
-    #  - backend
+    #  - frontend
+      - backend
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9093/-/healthy"]
       <<: *default_healthcheck

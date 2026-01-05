@@ -1,0 +1,253 @@
+###############################################################################
+# Start of default configs
+###############################################################################
+
+  #####################################
+  # Container base defaults
+  #####################################
+  # Max Usage Limits
+x-limits: &limits
+  mem_limit: ${MEM_LIMIT:-2G} # Override per container if necessary
+  memswap_limit: ${MEM_SWAP_LIMIT:-2.5G}
+  mem_reservation: ${MEM_RESERVATION:-64M}
+  pids_limit: ${PIDS_LIMIT:-200}
+  cpus: ${CPUS_LIMIT:-2} # Set below the total number of cores, for example 3.5 for 4 cores
+
+  # Restart Settings
+x-restart: &restart
+  stop_grace_period: ${RESTART_GRACE:-1m}
+  restart: ${RESTART_MODE:-unless-stopped}
+
+  # Configure security
+x-security: &security
+  security_opt:
+   - no-new-privileges=${NO_NEW_PRIVILEGES:-true}
+
+  # Configure User
+x-user: &user
+  user: ${PUID:-1000}:${PGID:-1000}
+
+  # Configure Logging
+x-logging: &logging
+  logging:
+    options:
+      max-size: ${LOG_MAX_SIZE:-10m}
+      max-file: ${LOG_MAX_FILE:-3}
+
+  ## All base defaults in one
+x-base: &default-base
+  <<: [*limits, *restart, *security, *user, *logging]
+
+  #####################################
+  # Container healthcheck defaults
+  #####################################
+x-healthcheck: &default_healthcheck
+  interval: ${HEALTH_INTERVAL:-60s}
+  timeout: ${HEALTH_TIMEOUT:-10s}
+  retries: ${HEALTH_RETRIES:-5}
+  start_period: ${HEALTH_START:-10s}
+  
+  #####################################
+  # Container environment defaults
+  #####################################
+x-environment-tz: &environment_tz
+  TZ: ${TZ:-America/Chicago}
+
+x-environment-user: &environment_user
+  PUID: ${PUID:-1000}
+  PGID: ${PGID:-1000}
+
+  ## All environment defaults in one
+x-environment: &default_environment
+  <<: [*environment_tz, *environment_user]
+
+###############################################################################
+# Start of stack config
+###############################################################################
+# Project Name
+name: ${PROJECT_NAME}
+
+networks:
+#  proxy:
+#    name: ${PROXY_NETWORK}
+#    external: true
+  frontend:
+    name: ${PROJECT_NAME}_frontend
+    internal: false
+    driver_opts:
+      encrypted: "true"
+  backend:
+    name: ${PROJECT_NAME}_backend
+    internal: true
+    driver_opts:
+      encrypted: "true"
+  socket_proxy:
+    name: ${PROJECT_NAME}_socket_proxy
+    internal: true
+    driver_opts:
+      encrypted: "true"
+
+services:
+
+  vlagent:
+    <<: [*limits, *restart, *security, *user, *logging]
+    image: victoriametrics/vlagent:v1.41.0
+    hostname: vlagent.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-vlagent
+    command:
+      - '--syslog.listenAddr.tcp=0.0.0.0:8094'
+      - '--remoteWrite.tmpDataPath=/vlagent'
+      - '--remoteWrite.maxDiskUsagePerURL=1000MB'
+      - "--remoteWrite.basicAuth.username=${VMAUTH_USER}"
+      - "--remoteWrite.basicAuth.password=${VMAUTH_PASS}"
+      - "--remoteWrite.url=http://victoriametrics-auth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}/insert/native"
+    #ports:
+    #  - 9429:9429
+    environment:
+      <<: [*environment_tz, *environment_user]
+    volumes:
+      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/vlagent-data:/vlagent
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9429/health"]
+      <<: *default_healthcheck
+
+  #  Metrics collector.
+  #  It scrapes targets defined in --promscrape.config
+  #  And forward them to --remoteWrite.url
+  vmagent:
+    <<: [*limits, *restart, *security, *user, *logging]
+    image: victoriametrics/vmagent:latest
+    hostname: vmagent.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-vmagent
+    command:
+      - "--promscrape.config=/etc/prometheus/prometheus.yml"
+      - "--remoteWrite.tmpDataPath=/vmagent"
+      - '--remoteWrite.maxDiskUsagePerURL=1000MB'
+      - "--remoteWrite.basicAuth.username=${VMAUTH_USER}"
+      - "--remoteWrite.basicAuth.password=${VMAUTH_PASS}"
+      - "--remoteWrite.url=https://victoriametrics-auth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}/api/v1/write"
+    #ports:
+    #  - 8429:8429
+    environment:
+      <<: [*environment_tz, *environment_user]
+      SERVER_ADDRESS: ${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}
+      SERVER_NAME: ${SERVER_NAME}
+    volumes:
+      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/vmagent-data:/vmagent
+      - ./vmagent-config/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8429/health"]
+      <<: *default_healthcheck
+
+  # vector is logs collector. It collects logs according to vector.yml
+  # and forwards them to VictoriaLogs
+  vector:
+    #<<: [*limits, *restart, *security, *user, *logging]
+    <<: [*limits, *restart, *security, *logging]
+    image: docker.io/timberio/vector:0.46.X-distroless-libc
+    hostname: vector.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-vector
+    #ports:
+    #  - "8686:8686"
+    environment:
+      <<: [*environment_tz, *environment_user]
+      DOCKER_HOST: tcp://${PROJECT_NAME}-socket-proxy:2375
+    volumes:
+      #- type: bind
+      #  source: /var/run/docker.sock
+      #  target: /var/run/docker.sock
+      #- type: bind
+      #  source: /var/lib/docker
+      #  target: /var/lib/docker
+      - ./vector-config/vector.yml:/etc/vector/vector.yaml:ro
+    labels: ## Komodo Labels
+      - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
+    networks:
+      - socket_proxy
+      - backend
+    depends_on:
+      vlagent:
+        condition: service_healthy
+      vmagent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/bin/vector", "validate", "--skip-healthchecks"]
+      <<: *default_healthcheck
+
+  cadvisor:
+    <<: [*limits, *restart, *security, *logging]
+    image: gcr.io/cadvisor/cadvisor:latest
+    hostname: cadvisor.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
+    container_name: ${PROJECT_NAME}-cadvisor
+    #ports:
+    #  - 8080:8080
+    environment:
+      <<: [*environment_tz]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - backend
+    privileged: true
+    userns_mode: host
+    devices:
+      - /dev/kmsg
+    healthcheck:
+      test: ["CMD", "/usr/bin/cadvisor", "-version"]
+      <<: *default_healthcheck
+
+  socket-proxy:
+    <<: [*limits, *restart, *security, *logging]
+    image: lscr.io/linuxserver/socket-proxy:${SOCKET_PROXY_VERSION:-latest}
+    hostname: ${PROJECT_NAME}-socket-proxy.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}
+    container_name: "${PROJECT_NAME}-socket-proxy"
+    environment:
+      <<: [*environment_tz, *environment_user]
+      ALLOW_START: 0 #optional
+      ALLOW_STOP: 0 #optional
+      ALLOW_RESTARTS: 0 #optional
+      AUTH: 0 #optional
+      BUILD: 0 #optional
+      COMMIT: 0 #optional
+      CONFIGS: 0 #optional
+      CONTAINERS: 1 #optional
+      DISABLE_IPV6: 0 #optional
+      DISTRIBUTION: 0 #optional
+      EVENTS: 1 #optional
+      EXEC: 0 #optional
+      IMAGES: 0 #optional
+      INFO: 1 #optional
+      LOG_LEVEL: info #optional
+      NETWORKS: 0 #optional
+      NODES: 0 #optional
+      PING: 1 #optional
+      PLUGINS: 0 #optional
+      POST: 1 #optional
+      SECRETS: 0 #optional
+      SERVICES: 0 #optional
+      SESSION: 0 #optional
+      SWARM: 0 #optional
+      SYSTEM: 0 #optional
+      TASKS: 0 #optional
+      VERSION: 1 #optional
+      VOLUMES: 0 #optional
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket_proxy
+    userns_mode: "host"
+    read_only: true
+    tmpfs:
+      - /run
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:2375/version"]
+      <<: *default_healthcheck
