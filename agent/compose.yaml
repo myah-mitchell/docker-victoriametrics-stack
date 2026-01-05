@@ -100,7 +100,7 @@ services:
       - '--remoteWrite.maxDiskUsagePerURL=1000MB'
       - "--remoteWrite.basicAuth.username=${VMAUTH_USER}"
       - "--remoteWrite.basicAuth.password=${VMAUTH_PASS}"
-      - "--remoteWrite.url=http://victoriametrics-auth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}/insert/native"
+      - "--remoteWrite.url=https://victoriametrics-auth.${DOMAIN_NAME}/insert/native"
     #ports:
     #  - 9429:9429
     environment:
@@ -128,7 +128,7 @@ services:
       - '--remoteWrite.maxDiskUsagePerURL=1000MB'
       - "--remoteWrite.basicAuth.username=${VMAUTH_USER}"
       - "--remoteWrite.basicAuth.password=${VMAUTH_PASS}"
-      - "--remoteWrite.url=https://victoriametrics-auth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}/api/v1/write"
+      - "--remoteWrite.url=https://victoriametrics-auth.${DOMAIN_NAME}/api/v1/write"
     #ports:
     #  - 8429:8429
     environment:

@@ -103,8 +103,8 @@ services:
       - "--storageDataPath=/storage"
       - "--promscrape.config=/etc/prometheus/prometheus.yml"
       - "--vmalert.proxyURL=http://vmalert:8880"
-    ports:
-      - "8428:8428"
+    #ports:
+    #  - "8428:8428"
     environment:
       <<: [*environment_tz, *environment_user]
     volumes:
@@ -144,8 +144,8 @@ services:
     container_name: ${PROJECT_NAME}-logs
     command:
       - "--storageDataPath=/vlogs"
-    ports:
-      - "9428:9428"
+    #ports:
+    #  - "9428:9428"
     environment:
       <<: [*environment_tz, *environment_user]
     volumes:
@@ -184,8 +184,8 @@ services:
     container_name: ${PROJECT_NAME}-traces
     command:
       - "--storageDataPath=/vtraces"
-    ports:
-      - "10428:10428"
+    #ports:
+    #  - "10428:10428"
     environment:
       <<: [*environment_tz, *environment_user]
     volumes:
@@ -227,8 +227,8 @@ services:
       - "--auth.config=/etc/auth.yml"
       - "--httpAuth.username=${VMAUTH_USER}"
       - "--httpAuth.password=${VMAUTH_PASS}"
-    ports:
-      - 8427:8427
+    #ports:
+    #  - 8427:8427
     environment:
       <<: [*environment_tz, *environment_user]
     volumes:
@@ -282,8 +282,8 @@ services:
       # display source of alerts in grafana
       - "--external.url=http://127.0.0.1:3000" #grafana outside container
       - '--external.alert.source=explore?orgId=1&left={"datasource":"{{ if eq .Type "vlogs" }}VictoriaLogs{{ else }}VictoriaMetrics{{ end }}","queries":[{"expr":{{.Expr|jsonEscape|queryEscape}},"refId":"A"}],"range":{"from":"{{ .ActiveAt.UnixMilli }}","to":"now"}}'
-    ports:
-      - 8880:8880
+    #ports:
+    #  - 8880:8880
     environment:
       <<: [*environment_tz, *environment_user]
     volumes:
@@ -375,8 +375,8 @@ services:
     container_name: ${PROJECT_NAME}-alertmanager
     command:
       - "--config.file=/config/alertmanager.yml"
-    ports:
-      - 9093:9093
+    #ports:
+    #  - 9093:9093
     environment:
       <<: [*environment_tz, *environment_user]
     volumes:
