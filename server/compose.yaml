@@ -107,6 +107,7 @@ services:
     #  - "8428:8428"
     environment:
       <<: [*environment_tz, *environment_user]
+      SERVER_ADDRESS: ${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}
     volumes:
       - ${DOCKER_VOLUMES}/${PROJECT_NAME}/victoriametrics-data:/storage
       - ./victoriametrics-config/prometheus-vl-single.yml:/etc/prometheus/prometheus.yml
