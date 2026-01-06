@@ -96,7 +96,7 @@ services:
   # scraping, storing metrics and serve read requests.
   victoriametrics:
     <<: [*limits, *restart, *security, *user, *logging]
-    image: victoriametrics/victoria-metrics:v1.129.1
+    image: victoriametrics/victoria-metrics:${VICTORIAMETRICS_VERSION:-latest}
     hostname: victoriametrics.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-metrics
     command:
@@ -140,7 +140,7 @@ services:
   #  storing logs and serving read queries.
   victorialogs:
     <<: [*limits, *restart, *security, *user, *logging]
-    image: victoriametrics/victoria-logs:v1.43.1
+    image: victoriametrics/victoria-logs:${VICTORIALOGS_VERSION:-latest}
     hostname: victorialogs.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-logs
     command:
@@ -180,7 +180,7 @@ services:
   #  storing trace span and serving read queries.
   victoriatraces:
     <<: [*limits, *restart, *security, *user, *logging]
-    image: 'docker.io/victoriametrics/victoria-traces:latest'
+    image: docker.io/victoriametrics/victoria-traces:${VICTORIATRACES_VERSION:-latest}
     hostname: victoriatraces.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-traces
     command:
@@ -221,7 +221,7 @@ services:
 #  # depending on the requested path.
   vmauth:
     <<: [*limits, *restart, *security, *user, *logging]
-    image: victoriametrics/vmauth:v1.129.1
+    image: victoriametrics/vmauth:${VMAUTH_VERSION:-latest}
     hostname: vmauth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vmauth
     command:
@@ -267,7 +267,7 @@ services:
 #  # vmalert executes alerting and recording rules according to the given rule type.
   vmalert:
     <<: [*limits, *restart, *security, *user, *logging]
-    image: victoriametrics/vmalert:v1.129.1
+    image: victoriametrics/vmalert:${VMALERT_VERSION:-latest}
     hostname: vmalert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vmalert
     command:
@@ -326,7 +326,7 @@ services:
   # Grafana instance configured with VictoriaLogs as datasource
   grafana:
     <<: [*limits, *restart, *security, *user, *logging]
-    image: grafana/grafana:12.2.1
+    image: grafana/grafana:${GRAFANA_VERSION:-latest}
     hostname: grafana.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-grafana
     #ports:
@@ -375,7 +375,7 @@ services:
   # and distributes them according to --config.file.
   alertmanager:
     <<: [*limits, *restart, *security, *logging]
-    image: prom/alertmanager:v0.28.1
+    image: prom/alertmanager:${ALERTMANAGER_VERSION:-latest}
     hostname: alertmanager.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-alertmanager
     command:

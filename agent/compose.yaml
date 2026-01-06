@@ -94,7 +94,7 @@ services:
   #  And forwards them to --remoteWrite.url
   vlagent:
     <<: [*limits, *restart, *security, *user, *logging]
-    image: victoriametrics/vlagent:v1.41.0
+    image: victoriametrics/vlagent:${VLAGENT_VERSION:-latest}
     hostname: vlagent.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vlagent
     command:
@@ -122,7 +122,7 @@ services:
   #  And forward them to --remoteWrite.url
   vmagent:
     <<: [*limits, *restart, *security, *user, *logging]
-    image: victoriametrics/vmagent:latest
+    image: victoriametrics/vmagent:${VMAGENT_VERSION:-latest}
     hostname: vmagent.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vmagent
     command:
@@ -165,7 +165,7 @@ services:
   vector:
     #<<: [*limits, *restart, *security, *user, *logging]
     <<: [*limits, *restart, *security, *logging]
-    image: docker.io/timberio/vector:0.46.X-distroless-libc
+    image: docker.io/timberio/vector:${VECTOR_VERSION:-latest-distroless-libc}
     hostname: vector.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vector
     #ports:
@@ -191,7 +191,7 @@ services:
 
   cadvisor:
     <<: [*limits, *restart, *security, *logging]
-    image: gcr.io/cadvisor/cadvisor:latest
+    image: gcr.io/cadvisor/cadvisor:${CADVISOR_VERSION:-latest}
     hostname: cadvisor.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-cadvisor
     #ports:
