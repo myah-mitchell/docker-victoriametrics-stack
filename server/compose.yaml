@@ -241,6 +241,8 @@ services:
         Host(`${SERVICE_NAME}-auth.${DOMAIN_NAME}`) ||
         Host(`${SERVICE_NAME}-auth.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
         Host(`${SERVICE_NAME}-auth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-auth.${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-auth.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
         Host(`${PROJECT_NAME}-auth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
         ## Middlewares
       - "traefik.http.routers.$PROJECT_NAME-vmauth-rtr.middlewares=chain-no-auth@file"
@@ -296,6 +298,8 @@ services:
         Host(`${SERVICE_NAME}-alert.${DOMAIN_NAME}`) ||
         Host(`${SERVICE_NAME}-alert.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
         Host(`${SERVICE_NAME}-alert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-alert.${DOMAIN_NAME}`) ||
+        Host(`${PROJECT_NAME}-alert.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`) ||
         Host(`${PROJECT_NAME}-alert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
         ## Middlewares
       - "traefik.http.routers.$PROJECT_NAME-vmalert-rtr.middlewares=chain-authentik@file"
