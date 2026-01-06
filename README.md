@@ -78,7 +78,7 @@ rm -rf ./node_exporter-*.linux-amd64*
 Generate a new self-signed certificate (replace "MyState", "MyCity", "MyOrg", and "ServerFQDN" with real data):
 
 ```bash
-openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 -keyout /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.key -out /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.crt -subj "/C=US/ST=MyState/L=MyCity/O=MyOrg/CN=node-exporter" -addext "subjectAltName = DNS:ServerFQDN"
+sudo openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 -keyout /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.key -out /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.crt -subj "/C=US/ST=MyState/L=MyCity/O=MyOrg/CN=node-exporter" -addext "subjectAltName = DNS:ServerFQDN"
 ```
 
 ## Create Authentication Hash
@@ -126,7 +126,6 @@ Assign ownership permissions of the node_exporter binary to this user:
 
 ```bash
 sudo chown node_exporter:node_exporter -R /opt/docker/volumes/victoriametrics/node-exporter
-sudo chown node_exporter:node_exporter /opt/docker/volumes/victoriametrics/node-exporter/node_exporter
 ```
 
 ## Configure the Service
