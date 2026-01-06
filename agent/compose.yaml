@@ -89,6 +89,9 @@ networks:
 
 services:
 
+  #  Log collector.
+  #  It listens for syslog and other remote connections
+  #  And forwards them to --remoteWrite.url
   vlagent:
     <<: [*limits, *restart, *security, *user, *logging]
     image: victoriametrics/vlagent:v1.41.0
@@ -171,12 +174,6 @@ services:
       <<: [*environment_tz, *environment_user]
       DOCKER_HOST: tcp://${PROJECT_NAME}-socket-proxy:2375
     volumes:
-      #- type: bind
-      #  source: /var/run/docker.sock
-      #  target: /var/run/docker.sock
-      #- type: bind
-      #  source: /var/lib/docker
-      #  target: /var/lib/docker
       - ./vector-config/vector.yml:/etc/vector/vector.yaml:ro
     labels: ## Komodo Labels
       - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
