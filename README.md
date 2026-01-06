@@ -182,3 +182,30 @@ To confirm the service is running properly, check its status:
 ```bash
 sudo systemctl status node_exporter.service
 ```
+
+## Open Port in UFW for Node-Exporter
+
+We need to create a UFW application so that we can let vmagent scrape Node-Exporter
+
+```bash
+sudo vi /etc/ufw/applications.d/node-exporter
+```
+
+```bash
+[Node-Exporter]
+title=Node-Exporter
+description=Allows incoming traffic for Node-Exporter on port 9100
+ports=9100/tcp
+```
+
+We then can enable this new application
+
+```bash
+sudo ufw app update Node-Exporter
+sudo ufw app list
+sudo ufw allow Node-Exporter
+```
+
+sudo ufw app update WebProxy
+sudo ufw app list
+sudo ufw allow WebProxy
