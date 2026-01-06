@@ -5,8 +5,7 @@ This stack was created from the example configs provided by VictroaMetrics at:
 * https://github.com/VictoriaMetrics/VictoriaMetrics/tree/master/deployment/docker
 * https://github.com/VictoriaMetrics/VictoriaTraces/tree/master/deployment/docker
 
-Install node-exporter on each host by following:
-* https://docs.techdox.nz/node-exporter/
+This setup requires [Node-Exporter](https://github.com/prometheus/node_exporter) is installed on the host. The steps to do this are later in this README.
 
 ## Create needed folders for server
 
@@ -16,6 +15,7 @@ mkdir -p /opt/docker/volumes/victoriametrics/victoriametrics-data
 mkdir -p /opt/docker/volumes/victoriametrics/victoriatraces-data
 mkdir -p /opt/docker/volumes/victoriametrics/vmagent-data
 mkdir -p /opt/docker/volumes/victoriametrics/vlagent-data
+mkdir -p /opt/docker/volumes/victoriametrics/node-exporter/config
 mkdir -p /opt/docker/volumes/victoriametrics/grafana-data
 chmod -R 770 /opt/docker/volumes/victoriametrics/*
 sudo chown $USER:101000 /opt/docker/volumes/victoriametrics
@@ -25,9 +25,161 @@ sudo chown 101000:101000 /opt/docker/volumes/victoriametrics/*
 ## Create needed folders for agent
 
 ```bash
-mkdir -p /opt/docker/volumes/victoriametrics-agent/vmagent-data
-mkdir -p /opt/docker/volumes/victoriametrics-agent/vlagent-data
-chmod -R 770 /opt/docker/volumes/victoriametrics-agent/*
-sudo chown $USER:101000 /opt/docker/volumes/victoriametrics-agent
-sudo chown 101000:101000 /opt/docker/volumes/victoriametrics-agent/*
+mkdir -p /opt/docker/volumes/victoriametrics/vmagent-data
+mkdir -p /opt/docker/volumes/victoriametrics/vlagent-data
+mkdir -p /opt/docker/volumes/victoriametrics/node-exporter/config
+chmod -R 770 /opt/docker/volumes/victoriametrics/*
+sudo chown $USER:101000 /opt/docker/volumes/victoriametrics
+sudo chown 101000:101000 /opt/docker/volumes/victoriametrics/*
+```
+
+# Setting Up Node Exporter
+
+These steps are a combination of the guides from the following two sites:
+* [Setting Up Node Exporter - Techdox Docs](https://docs.techdox.nz/node-exporter/)
+* [Securing Node Exporter Metrics - DEV Community](https://dev.to/cod3mason/securing-node-exporter-metrics-2ome)
+
+## Download Node Exporter
+
+Begin by downloading Node Exporter using the wget command:
+
+```bash
+cd /tmp
+wget https://github.com/prometheus/node_exporter/releases/download/v1.10.2/node_exporter-1.10.2.linux-amd64.tar.gz
+```
+
+Note: Ensure you are using the latest version of Node Exporter and the correct architecture build for your server. The provided link is for amd64. For the latest releases, check here - [Prometheus Node Exporter Releases](https://github.com/prometheus/node_exporter/releases)
+
+
+## Extract the Contents
+
+After downloading, extract the contents with the following command:
+
+```bash
+tar xvf node_exporter-*.linux-amd64.tar.gz
+```
+
+## Move the Node Exporter Binary
+
+Move the node_exporter binary to /usr/local/bin:
+
+```bash
+sudo cp node_exporter-*.linux-amd64/node_exporter /opt/docker/volumes/victoriametrics/node-exporter
+```
+
+Then, clean up by removing the downloaded tar file and its directory:
+
+```bash
+rm -rf ./node_exporter-*.linux-amd64*
+```
+
+## Create Certificate
+
+Generate a new self-signed certificate (replace "MyState", "MyCity", "MyOrg", and "ServerFQDN" with real data):
+
+```bash
+openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 -keyout /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.key -out /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.crt -subj "/C=US/ST=MyState/L=MyCity/O=MyOrg/CN=node-exporter" -addext "subjectAltName = DNS:ServerFQDN"
+```
+
+## Create Authentication Hash
+
+Now generate node-exporter password creator by creating `/opt/docker/volumes/victoriametrics/node-exporter/gen-pass.py`
+
+```python
+#!/usr/bin/python3
+
+import getpass
+import bcrypt
+
+password = getpass.getpass("password: ")
+hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+print(hashed_password.decode())
+```
+
+And now running the script to hash your node-exporter password:
+
+```bash
+python3 gen-pass.py
+```
+
+## Setup and Configure `node-exporter`
+
+Add certificates and authentication into `/opt/docker/volumes/victoriametrics/node-exporter/config/config.yml`
+
+```yaml
+tls_server_config:
+  cert_file: /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.crt
+  key_file: /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.key
+basic_auth_users:
+  node-exporter-user: <HASHED-PASSWD>
+```
+
+## Create a Node Exporter User
+
+Create a dedicated user for running Node Exporter:
+
+```bash
+sudo useradd --no-create-home --shell /bin/false node_exporter
+```
+
+Assign ownership permissions of the node_exporter binary to this user:
+
+```bash
+sudo chown node_exporter:node_exporter -R /opt/docker/volumes/victoriametrics/node-exporter
+sudo chown node_exporter:node_exporter /opt/docker/volumes/victoriametrics/node-exporter/node_exporter
+```
+
+## Configure the Service
+
+To ensure Node Exporter automatically starts on server reboot, configure the systemd service:
+
+```bash
+sudo vi /etc/systemd/system/node_exporter.service
+```
+
+Then, paste the following configuration:
+```bash
+[Unit]
+Description=Node Exporter
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+ExecStart=/opt/docker/volumes/victoriametrics/node-exporter/node_exporter --web.config.file=/opt/docker/volumes/victoriametrics/node-exporter/config/config.yml
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save and exit the editor.
+
+## Enable and Start the Service
+
+Reload the systemd daemon:
+
+```bash
+sudo systemctl daemon-reload
+```
+
+Enable the Node Exporter service:
+
+```bash
+sudo systemctl enable node_exporter
+```
+
+Start the service:
+
+```bash
+sudo systemctl start node_exporter
+```
+
+To confirm the service is running properly, check its status:
+
+```bash
+sudo systemctl status node_exporter.service
 ```

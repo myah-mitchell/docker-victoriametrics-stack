@@ -134,9 +134,11 @@ services:
     environment:
       <<: [*environment_tz, *environment_user]
       SERVER_ADDRESS: ${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}
-      SERVER_NAME: ${SERVER_NAME}
+      NODE_EXPORTER_USER: ${NODE_EXPORTER_USER}
+      NODE_EXPORTER_PASS: ${NODE_EXPORTER_PASS}
     volumes:
       - ${DOCKER_VOLUMES}/${PROJECT_NAME}/vmagent-data:/vmagent
+      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/node-exporter/config/node_exporter.crt:/etc/prometheus/node_exporter.crt:ro
       - ./vmagent-config/prometheus.yml:/etc/prometheus/prometheus.yml
     labels: ## Traefik Labels
       - "traefik.enable=true"
