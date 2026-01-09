@@ -5,6 +5,11 @@ This stack was created from the example configs provided by VictroaMetrics at:
 * https://github.com/VictoriaMetrics/VictoriaMetrics/tree/master/deployment/docker
 * https://github.com/VictoriaMetrics/VictoriaTraces/tree/master/deployment/docker
 
+Alert Rules came from:
+* https://github.com/VictoriaMetrics
+* https://samber.github.io/awesome-prometheus-alerts/rules
+* https://monitoring.mixins.dev/
+
 This setup requires [Node-Exporter](https://github.com/prometheus/node_exporter) is installed on the host. The steps to do this are later in this README.
 
 ## Create needed folders for server
