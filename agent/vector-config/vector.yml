@@ -1,34 +1,76 @@
+data_dir: "/var/lib/vector"
+
 api:
   enabled: true
   address: 0.0.0.0:8686
+
 sources:
-  docker:
+  docker_socket:
     type: docker_logs
+  
+  # Internal metrics
   vector_metrics:
     type: internal_metrics
+
 transforms:
-  msg_parser:
-    type: remap
-    inputs: [docker]
+  # Process and structure the logs
+  process_logs:
+    type: "remap"
+    inputs: ["docker_socket"]
     source: |
-      .message = parse_json(.message) ?? .message
+      # 1. Clean up Metadata
+      # Ensure container_name is a string before replacing (handles nulls safely).
+      .container_name = replace(string(.container_name) ?? "", "/", "")
+
+      # 2. Structured Log Parsing
+      # Try to parse the message as JSON.
+      structured, err = parse_json(.message)
+
+      if err == null {
+        # If successful, merge the JSON keys to the root of the event.
+        merged, merge_err = merge(., structured)
+        
+        if merge_err == null {
+          . = merged
+          # If the JSON had a 'msg' field, normalize it to 'message'
+          if exists(.msg) {
+            .message = .msg
+            del(.msg)
+          }
+        }
+      } 
+      # If parsing fails, the original .message text is preserved.
+
 sinks:
-  elasticsearch:
-    type: elasticsearch
-    inputs: [msg_parser]
-    endpoints: [http://vlagent:9429/insert/elasticsearch/]
-    mode: bulk
-    api_version: v8
-    compression: gzip
+  victorialogs:
+    type: "elasticsearch"
+    inputs: ["process_logs"]
+    endpoints: ["http://vlagent:9429/insert/elasticsearch/"]
+    mode: "bulk"
+    api_version: "v8"
+    compression: "gzip"
     healthcheck:
       enabled: false
+
+    # Control latency vs. throughput
+    batch:
+      max_bytes: 1048576 # Send batch when it hits 1MB
+      timeout_secs: 1    # OR send whatever we have every 1 second (Lowers latency)
+
     request:
       headers:
-        VL-Stream-Fields: source_type,label.com.docker.compose.service
-        VL-Time-Field: timestamp
-        VL-Msg-Field: message,msg,_msg,message.message,message.log
+        # Tells VL to look inside the JSON for a field named "container_name" to group logs
+        VL-Stream-Fields: "container_name"
+        # Tells VL which field contains the actual timestamp (Vector uses 'timestamp' by default)
+        VL-Time-Field: "timestamp"
+        # Tells VL which field contains the log message
+        VL-Msg-Field: "message"
+        # Optional: Helps debug if you have multiple Vector instances
+        User-Agent: "vector-sink"
         AccountID: "0"
         ProjectID: "0"
+
+  # Metrics Sink
   victoriametrics:
     type: prometheus_remote_write
     endpoint: http://vmagent:8429/api/v1/write
