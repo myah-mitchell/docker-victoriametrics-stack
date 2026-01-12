@@ -26,4 +26,4 @@ networks:
 
 # Include Agent services
 include:
-  - ../agent/compose.yaml
+  - ./agent/compose.yaml

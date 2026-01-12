@@ -26,4 +26,4 @@ networks:
 
 # Include Server
 include:
-  - ../server/compose.yaml
+  - ./server/compose.yaml
