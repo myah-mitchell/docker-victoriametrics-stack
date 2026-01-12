@@ -20,6 +20,7 @@ mkdir -p /opt/docker/volumes/victoriametrics/victoriametrics-data
 mkdir -p /opt/docker/volumes/victoriametrics/victoriatraces-data
 mkdir -p /opt/docker/volumes/victoriametrics/vmagent-data
 mkdir -p /opt/docker/volumes/victoriametrics/vlagent-data
+mkdir -p /opt/docker/volumes/victoriametrics/vector-data
 mkdir -p /opt/docker/volumes/victoriametrics/node-exporter/config
 mkdir -p /opt/docker/volumes/victoriametrics/grafana-data
 chmod 750 /opt/docker/volumes/victoriametrics
@@ -32,6 +33,7 @@ sudo chown 101000:101000 /opt/docker/volumes/victoriametrics/*
 ```bash
 mkdir -p /opt/docker/volumes/victoriametrics/vmagent-data
 mkdir -p /opt/docker/volumes/victoriametrics/vlagent-data
+mkdir -p /opt/docker/volumes/victoriametrics/vector-data
 mkdir -p /opt/docker/volumes/victoriametrics/node-exporter/config
 chmod 750 /opt/docker/volumes/victoriametrics
 sudo chown $USER:101000 /opt/docker/volumes/victoriametrics

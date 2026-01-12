@@ -1,34 +1,49 @@
+data_dir: "/var/lib/vector"
+
 api:
   enabled: true
   address: 0.0.0.0:8686
+
 sources:
   docker:
     type: docker_logs
   vector_metrics:
     type: internal_metrics
+
 transforms:
-  msg_parser:
+  parse_docker:
     type: remap
     inputs: [docker]
     source: |
       .message = parse_json(.message) ?? .message
+
 sinks:
-  elasticsearch:
+  victorialogs-docker:
     type: elasticsearch
-    inputs: [msg_parser]
+    inputs: [parse_docker]
     endpoints: [http://vlagent:9429/insert/elasticsearch/]
     mode: bulk
     api_version: v8
     compression: gzip
     healthcheck:
       enabled: false
+
+    # URL Query Parameters for Stream Identification
+    query:
+      # Fields that define the "Stream" (Service/App).
+      # WARNING: Do NOT include high-cardinality fields (IPs, RequestIDs) here.
+      _stream_fields: "source_type,label.com.docker.compose.service"
+      
+      # UI Display preferences
+      _msg_field: "message,msg,_msg,message.message,message.log"
+      _time_field: "timestamp"
     request:
       headers:
-        VL-Stream-Fields: source_type,label.com.docker.compose.service
-        VL-Time-Field: timestamp
-        VL-Msg-Field: message,msg,_msg,message.message,message.log
         AccountID: "0"
         ProjectID: "0"
+    bulk:
+      index: "docker-logs"
+
   victoriametrics:
     type: prometheus_remote_write
     endpoint: http://vmagent:8429/api/v1/write
