@@ -100,6 +100,7 @@ services:
     hostname: victoriametrics.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-metrics
     command:
+      - "--loggerFormat=json"
       - "--storageDataPath=/storage"
       - "--promscrape.config=/etc/prometheus/prometheus.yml"
       - "--vmalert.proxyURL=http://vmalert:8880"
@@ -144,6 +145,7 @@ services:
     hostname: victorialogs.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-logs
     command:
+      - "--loggerFormat=json"
       - "--storageDataPath=/vlogs"
     #ports:
     #  - "9428:9428"
@@ -184,6 +186,7 @@ services:
     hostname: victoriatraces.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-traces
     command:
+      - "--loggerFormat=json"
       - "--storageDataPath=/vtraces"
     #ports:
     #  - "10428:10428"
@@ -225,6 +228,7 @@ services:
     hostname: vmauth.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vmauth
     command:
+      - "--loggerFormat=json"
       - "--auth.config=/etc/auth.yml"
       - "--httpAuth.username=${VMAUTH_USER}"
       - "--httpAuth.password=${VMAUTH_PASS}"
@@ -271,6 +275,7 @@ services:
     hostname: vmalert.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vmalert
     command:
+      - "--loggerFormat=json"
       # it evaluates data against VictoriaMetrics and VictoriaLogs
       # vmauth routes queries to corresponding datasource based on API path
       - "--datasource.url=http://vmauth:8427/"
@@ -337,6 +342,7 @@ services:
       VMAUTH_PASS: ${VMAUTH_PASS}
       GF_PLUGINS_PREINSTALL: victoriametrics-logs-datasource, victoriametrics-metrics-datasource
       GF_INSTALL_PLUGINS: victoriametrics-logs-datasource, victoriametrics-metrics-datasource
+      GF_LOG_FORMAT: json
     volumes:
       - ${DOCKER_VOLUMES}/${PROJECT_NAME}/grafana-data:/var/lib/grafana
       - ./grafana-config/datasources/victoriametrics.yml:/etc/grafana/provisioning/datasources/victoriametrics.yml
@@ -379,6 +385,7 @@ services:
     hostname: alertmanager.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-alertmanager
     command:
+      - "--log.format=json"
       - "--config.file=/config/alertmanager.yml"
     #ports:
     #  - 9093:9093

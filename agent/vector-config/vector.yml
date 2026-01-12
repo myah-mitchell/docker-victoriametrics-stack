@@ -7,9 +7,8 @@ api:
 sources:
   docker_socket:
     type: docker_logs
-    include_containers: # Optional: Include all by default, or specific lists
-      - "*" 
-    # auto_partial_merge: true helps reconstruct split long log lines
+  
+  # Internal metrics
   vector_metrics:
     type: internal_metrics
 
@@ -20,44 +19,44 @@ transforms:
     inputs: ["docker_socket"]
     source: |
       # 1. Clean up Metadata
-      # Docker container names often come with a leading slash (e.g., "/traefik").
-      # We strip it for cleaner querying in VictoriaLogs.
-      .container_name = replace(.container_name, "/", "") ?? .container_name
+      # Ensure container_name is a string before replacing (handles nulls safely).
+      .container_name = replace(string(.container_name) ?? "", "/", "")
 
       # 2. Structured Log Parsing
-      # Many modern apps (Traefik, Caddy, Go apps) log in JSON.
-      # We attempt to parse the 'message' field as JSON.
+      # Try to parse the message as JSON.
       structured, err = parse_json(.message)
 
       if err == null {
         # If successful, merge the JSON keys to the root of the event.
-        # This makes fields like "level", "status_code", "duration" top-level fields in VictoriaLogs.
-        . = merge(., structured)
+        merged, merge_err = merge(., structured)
         
-        # 3. Message Normalization
-        # VictoriaLogs looks for a message content. If the JSON had a 'msg' or 'message' field,
-        # we ensure it stays as the main payload.
-        if exists(.msg) {
-          .message = .msg
-          del(.msg)
+        if merge_err == null {
+          . = merged
+          # If the JSON had a 'msg' field, normalize it to 'message'
+          if exists(.msg) {
+            .message = .msg
+            del(.msg)
+          }
         }
       } 
-      # If parsing fails (e.g., standard plain text log), .message remains as is.
+      # If parsing fails, the original .message text is preserved.
 
 sinks:
-  # Send to VictoriaLogs (via VLAgent) using the native JSON Line format
-  # This is more efficient than the Elasticsearch sink as it avoids the bulk API overhead.
   victorialogs:
-    type: "http"
-    inputs: ["parse_docker"]
-    uri: "http://vlagent:9429/insert/jsonline/"
-    method: "post"
+    type: "elasticsearch"
+    inputs: ["process_logs"]
+    endpoints: ["http://vlagent:9429/insert/elasticsearch/"]
+    mode: "bulk"
+    api_version: "v8"
     compression: "gzip"
-    encoding:
-      codec: "ndjson" # Newline Delimited JSON - the native format for VL
-      timestamp_format: "rfc3339"
+    healthcheck:
+      enabled: false
 
-    # Best Practice Headers for VictoriaLogs Native Ingestion
+    # Control latency vs. throughput
+    batch:
+      max_bytes: 1048576 # Send batch when it hits 1MB
+      timeout_secs: 1    # OR send whatever we have every 1 second (Lowers latency)
+
     request:
       headers:
         # Tells VL to look inside the JSON for a field named "container_name" to group logs
@@ -68,15 +67,10 @@ sinks:
         VL-Msg-Field: "message"
         # Optional: Helps debug if you have multiple Vector instances
         User-Agent: "vector-sink"
+        AccountID: "0"
+        ProjectID: "0"
 
-    # Batching settings to optimize network throughput
-    batch:
-      max_bytes: 1048576 # 1MB batches
-      timeout_secs: 1    # Or send whatever we have every 1 second
-      
-    healthcheck:
-      enabled: true
-
+  # Metrics Sink
   victoriametrics:
     type: prometheus_remote_write
     endpoint: http://vmagent:8429/api/v1/write
