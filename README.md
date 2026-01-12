@@ -22,7 +22,7 @@ mkdir -p /opt/docker/volumes/victoriametrics/vmagent-data
 mkdir -p /opt/docker/volumes/victoriametrics/vlagent-data
 mkdir -p /opt/docker/volumes/victoriametrics/node-exporter/config
 mkdir -p /opt/docker/volumes/victoriametrics/grafana-data
-chmod -R 770 /opt/docker/volumes/victoriametrics/*
+chmod 750 /opt/docker/volumes/victoriametrics
 sudo chown $USER:101000 /opt/docker/volumes/victoriametrics
 sudo chown 101000:101000 /opt/docker/volumes/victoriametrics/*
 ```
@@ -33,12 +33,22 @@ sudo chown 101000:101000 /opt/docker/volumes/victoriametrics/*
 mkdir -p /opt/docker/volumes/victoriametrics/vmagent-data
 mkdir -p /opt/docker/volumes/victoriametrics/vlagent-data
 mkdir -p /opt/docker/volumes/victoriametrics/node-exporter/config
-chmod -R 770 /opt/docker/volumes/victoriametrics/*
+chmod 750 /opt/docker/volumes/victoriametrics
 sudo chown $USER:101000 /opt/docker/volumes/victoriametrics
 sudo chown 101000:101000 /opt/docker/volumes/victoriametrics/*
 ```
 
+## How to run the service
+
+For each server you will start one of the compose files, only one should be ran per server as the have overlaping services.
+
+**Control Server Stack (Server)** The `compose-server.yaml` will start up a VictoriaMetrics server stack with VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana, and many other services. This compose file should only be deployed to one server. This stack also includes and deploys the Agent stack, so you don't need to deploy both on the same server.
+
+**Traefik-kop Stack (Agent)** The `compose-agent.yaml` will start up a Vector, VMAgent, VLAgent and some other services. This stack will collect, buffer and then forward onto the server stack. This stack should only be deployed once per server.
+
 # Setting Up Node Exporter
+
+Node Exporter is expected to be installed by the Agent stack and is used to collect metrics off of the host.
 
 These steps are a combination of the guides from the following two sites:
 * [Setting Up Node Exporter - Techdox Docs](https://docs.techdox.nz/node-exporter/)
