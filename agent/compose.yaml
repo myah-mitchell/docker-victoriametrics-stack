@@ -144,17 +144,17 @@ services:
     volumes:
       - ./vmagent-config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ${DOCKER_VOLUMES}/${PROJECT_NAME}/vmagent-data:/vmagent
-      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/node-exporter/config/node_exporter.crt:/etc/prometheus/node_exporter.crt:ro
-    labels: ## Traefik Labels
-      - "traefik.enable=true"
-        ## Add Traefik Entry for Node-exporter which runs locally on the host.
-        ## HTTP Routers
-      - "traefik.http.routers.node-exporter-rtr.rule=
-        Host(`node-exporter.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
-        ## Middlewares
-      - "traefik.http.routers.node-exporter-rtr.middlewares=chain-no-auth@file"
-        ## HTTP Services
-      - "traefik.http.services.node-exporter-svc.loadbalancer.server.url=http://localhost:9100"
+      - /etc/node-exporter/node_exporter.crt:/etc/prometheus/node_exporter.crt:ro
+    #labels: ## Traefik Labels
+    #  - "traefik.enable=true"
+    #    ## Add Traefik Entry for Node-exporter which runs locally on the host.
+    #    ## HTTP Routers
+    #  - "traefik.http.routers.node-exporter-rtr.rule=
+    #    Host(`node-exporter.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}`)"
+    #    ## Middlewares
+    #  - "traefik.http.routers.node-exporter-rtr.middlewares=chain-no-auth@file"
+    #    ## HTTP Services
+    #  - "traefik.http.services.node-exporter-svc.loadbalancer.server.url=http://localhost:9100"
     networks:
       - frontend
       - backend
