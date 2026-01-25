@@ -132,6 +132,14 @@ basic_auth_users:
   node-exporter-user: <HASHED-PASSWD>
 ```
 
+## Set proper permissions
+
+```bash
+sudo chmod 775 /etc/node-exporter
+sudo chmod 644 /etc/node-exporter/*
+sudo chmod 400 /etc/node-exporter/node_exporter.key
+```
+
 ## Create a Node Exporter User
 
 Create a dedicated user for running Node Exporter:

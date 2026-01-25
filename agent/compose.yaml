@@ -144,7 +144,7 @@ services:
     volumes:
       - ./vmagent-config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ${DOCKER_VOLUMES}/${PROJECT_NAME}/vmagent-data:/vmagent
-      - ${DOCKER_VOLUMES}/${PROJECT_NAME}/node-exporter/config/node_exporter.crt:/etc/prometheus/node_exporter.crt:ro
+      - /etc/node-exporter/node_exporter.crt:/etc/prometheus/node_exporter.crt:ro
     labels: ## Traefik Labels
       - "traefik.enable=true"
         ## Add Traefik Entry for Node-exporter which runs locally on the host.
