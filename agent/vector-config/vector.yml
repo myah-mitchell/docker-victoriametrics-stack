@@ -147,13 +147,6 @@ transforms:
             parsed_ts, ts_err = parse_timestamp(.proxy_ts, "%d/%b/%Y:%H:%M:%S.%f")
             if ts_err == null { .timestamp = parsed_ts }
 
-            # Create friendly names for HAProxy timers
-            .haproxy_timer_queue_ms = .tq
-            .haproxy_timer_wait_ms = .tw
-            .haproxy_timer_connect_ms = .tc
-            .haproxy_timer_response_ms = .tr
-            .haproxy_timer_total_ms = .tt
-
             # Infer Level from HTTP Status Code
             sc = to_int(haproxy_parts.status_code) ?? 200
             .level = "INFO"
