@@ -81,7 +81,7 @@ tar xvf node_exporter-*.linux-amd64.tar.gz
 Move the node_exporter binary to /usr/local/bin:
 
 ```bash
-sudo cp node_exporter-*.linux-amd64/node_exporter /opt/docker/volumes/victoriametrics/node-exporter
+sudo cp node_exporter-*.linux-amd64/node_exporter /usr/local/bin
 ```
 
 Then, clean up by removing the downloaded tar file and its directory:
@@ -95,12 +95,13 @@ rm -rf ./node_exporter-*.linux-amd64*
 Generate a new self-signed certificate (replace "MyState", "MyCity", "MyOrg", and "ServerFQDN" with real data):
 
 ```bash
-sudo openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 -keyout /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.key -out /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.crt -subj "/C=US/ST=MyState/L=MyCity/O=MyOrg/CN=node-exporter" -addext "subjectAltName = DNS:ServerFQDN"
+sudo mkdir /etc/node-exporter
+sudo openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 -keyout /etc/node-exporter/node_exporter.key -out /etc/node-exporter/node_exporter.crt -subj "/C=US/ST=MyState/L=MyCity/O=MyOrg/CN=node-exporter" -addext "subjectAltName = DNS:ServerFQDN"
 ```
 
 ## Create Authentication Hash
 
-Now generate node-exporter password creator by creating `/opt/docker/volumes/victoriametrics/node-exporter/gen-pass.py`
+Now generate node-exporter password creator by creating `/etc/node-exporter/gen-pass.py`
 
 ```python
 #!/usr/bin/python3
@@ -121,12 +122,12 @@ python3 gen-pass.py
 
 ## Setup and Configure `node-exporter`
 
-Add certificates and authentication into `/opt/docker/volumes/victoriametrics/node-exporter/config/config.yml`
+Add certificates and authentication into `/etc/node-exporter/config.yml`
 
 ```yaml
 tls_server_config:
-  cert_file: /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.crt
-  key_file: /opt/docker/volumes/victoriametrics/node-exporter/config/node_exporter.key
+  cert_file: /etc/node-exporter/node_exporter.crt
+  key_file: /etc/node-exporter/node_exporter.key
 basic_auth_users:
   node-exporter-user: <HASHED-PASSWD>
 ```
@@ -142,7 +143,7 @@ sudo useradd --no-create-home --shell /bin/false node_exporter
 Assign ownership permissions of the node_exporter binary to this user:
 
 ```bash
-sudo chown node_exporter:node_exporter -R /opt/docker/volumes/victoriametrics/node-exporter
+sudo chown node_exporter:node_exporter -R /etc/node-exporter
 ```
 
 ## Configure the Service
@@ -164,7 +165,7 @@ After=network-online.target
 User=node_exporter
 Group=node_exporter
 Type=simple
-ExecStart=/opt/docker/volumes/victoriametrics/node-exporter/node_exporter --web.config.file=/opt/docker/volumes/victoriametrics/node-exporter/config/config.yml
+ExecStart=/usr/local/bin/node_exporter --web.config.file=/etc/node-exporter/config.yml
 Restart=always
 RestartSec=3
 
