@@ -65,22 +65,27 @@ transforms:
       # We remove it for cleaner querying in VictoriaLogs.
       .container_name = replace(string(.container_name) ?? "", "/", "")
 
-      # --- 2. JSON Parsing Strategy ---
-      # First, try to parse the message as JSON. Many modern apps log in JSON.
-      # We strip surrounding whitespace to ensure clean parsing.
+      # --- 2. Structured Log Parsing ---
+      # First, try to parse the message as JSON.
       .message = strip_whitespace(string(.message) ?? "")
       structured, err = parse_json(.message)
 
+      # If JSON fails, try Key-Value (LogFmt). Grafana and many Go apps use this.
+      # It looks like: t=2024-01-01 lvl=info msg="Something happened"
+      if err != null {
+        structured, err = parse_key_value(.message)
+      }
+
       if err == null {
-        # === HAPPY PATH: JSON LOGS ===
-        # Merge the parsed JSON fields to the root of the event.
+        # === HAPPY PATH: STRUCTURED LOGS (JSON OR KV) ===
+        # Merge the parsed fields to the root of the event.
         merged, merge_err = merge(., structured)
         
         if merge_err == null {
           . = merged
           
           # A. Message Normalization
-          # Move 'msg' or 'log' fields to the standard 'message' field
+          # Move 'msg', 'log', or 'message' fields to the standard 'message' field
           if exists(.msg) {
             .message = .msg
             del(.msg)
@@ -93,7 +98,6 @@ transforms:
 
           # B. Level Normalization
           # Scan for common level fields (severity, lvl, log_level).
-          # 'compact' removes nulls from the list, grabbing the first valid one.
           found_levels = compact([.level, .severity, .lvl, .log_level])
           if length(found_levels) > 0 {
              raw_level = string(found_levels[0]) ?? "UNKNOWN"
@@ -103,33 +107,34 @@ transforms:
           }
 
           # C. Timestamp Normalization
-          # Handle 'ts' (VictoriaMetrics/Go style) or fix overwritten 'timestamp' (Vector style).
-          if exists(.ts) {
-            # Parse ISO8601/RFC3339 format (e.g. 2026-01-25T01:03:24.204Z)
-            parsed_ts, ts_err = parse_timestamp(.ts, "%+") 
+          # Handle 'ts' (VM), 't' (Grafana), or fix 'timestamp' (Vector).
+          ts_val = null
+          ts_field = null
+
+          if exists(.ts) { ts_val = .ts; ts_field = "ts" }
+          else if exists(.t) { ts_val = .t; ts_field = "t" }
+          else if is_string(.timestamp) { ts_val = .timestamp; ts_field = "timestamp" }
+
+          if ts_val != null {
+            # Parse ISO8601/RFC3339 format (e.g. 2026-01-25T...)
+            parsed_ts, ts_err = parse_timestamp(ts_val, "%+") 
             if ts_err == null {
               .timestamp = parsed_ts
-              del(.ts) # Clean up duplicate
+              # Remove original field to avoid duplication (unless it was .timestamp, which we overwrote)
+              if ts_field != "timestamp" {
+                 del(."{{ts_field}}")
+              }
             }
-          } else if is_string(.timestamp) {
-             # CRITICAL: If the JSON payload had a "timestamp" string, it overwrote 
-             # Vector's native Timestamp object. We must parse it back to an Object
-             # so that the final formatting step doesn't crash.
-             parsed_ts, ts_err = parse_timestamp(.timestamp, "%+")
-             if ts_err == null {
-               .timestamp = parsed_ts
-             }
           }
 
           # D. Safety Check
-          # VictoriaLogs requires 'message' to be a string. If the JSON log had a 
-          # complex object in 'message', we stringify it back to JSON text.
+          # VictoriaLogs requires 'message' to be a string.
           if !is_string(.message) {
             .message = encode_json(.message)
           }
         } else {
           # Log internal error if JSON merge fails (e.g. type conflict)
-          log("JSON Merge failed for " + .container_name + ": " + (string(merge_err) ?? "unknown error"), level: "error")
+          log("Structured Merge failed for " + .container_name + ": " + (string(merge_err) ?? "unknown error"), level: "error")
         }
       } else {
         # === FALLBACK PATH: TEXT LOGS (REGEX) ===
