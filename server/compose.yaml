@@ -109,6 +109,8 @@ services:
     environment:
       <<: [*environment_tz, *environment_user]
       SERVER_ADDRESS: ${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}
+      VMAUTH_USER: ${VMAUTH_USER}
+      VMAUTH_PASS: ${VMAUTH_PASS}
     volumes:
       - ${DOCKER_VOLUMES}/${PROJECT_NAME}/victoriametrics-data:/storage
       - ./victoriametrics-config/prometheus-vl-single.yml:/etc/prometheus/prometheus.yml
