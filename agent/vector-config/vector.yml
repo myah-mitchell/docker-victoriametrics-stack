@@ -71,9 +71,14 @@ transforms:
       structured, err = parse_json(.message)
 
       # If JSON fails, try Key-Value (LogFmt). Grafana and many Go apps use this.
-      # It looks like: t=2024-01-01 lvl=info msg="Something happened"
+      # CRITICAL: We MUST skip this for containers known to use specific text formats (handled by Regex below).
+      # Otherwise, parse_key_value() aggressively parses text logs (like HAProxy) as boolean keys (e.g. "200": true),
+      # corrupting the log and preventing the Regex fallback from running.
       if err != null {
-        structured, err = parse_key_value(.message)
+        is_known_text_container = match(.container_name, r'socket-proxy|traefik-kop|cadvisor|logrotate|postgres|ferretdb')
+        if !is_known_text_container {
+           structured, err = parse_key_value(.message)
+        }
       }
 
       if err == null {
@@ -111,9 +116,21 @@ transforms:
           ts_val = null
           ts_field = null
 
-          if exists(.ts) { ts_val = .ts; ts_field = "ts" }
-          else if exists(.t) { ts_val = .t; ts_field = "t" }
-          else if is_string(.timestamp) { ts_val = .timestamp; ts_field = "timestamp" }
+          # Expanded blocks to avoid VRL syntax errors with single-line else-if assignments
+          if exists(.ts) { 
+            ts_val = .ts
+            ts_field = "ts" 
+          } else {
+            if exists(.t) { 
+              ts_val = .t
+              ts_field = "t" 
+            } else {
+              if is_string(.timestamp) { 
+                ts_val = .timestamp
+                ts_field = "timestamp" 
+              }
+            }
+          }
 
           if ts_val != null {
             # Parse ISO8601/RFC3339 format (e.g. 2026-01-25T...)
@@ -138,7 +155,7 @@ transforms:
         }
       } else {
         # === FALLBACK PATH: TEXT LOGS (REGEX) ===
-        # If JSON parsing failed, we check specific container types and apply Regex.
+        # If structured parsing failed, we check specific container types and apply Regex.
         
         # --- Socket-Proxy (HAProxy Format) ---
         # Matches: traefik-socket-proxy, dozzle-socket-proxy, etc.
@@ -213,6 +230,7 @@ transforms:
              .message = lr_parts.msg
              .source_origin = lr_parts.src
              
+             # Parse timestamp (e.g. 2026-01-24 20:02:32)
              parsed_ts, ts_err = parse_timestamp(lr_parts.ts, "%Y-%m-%d %H:%M:%S")
              if ts_err == null {
                .timestamp = parsed_ts
@@ -220,6 +238,66 @@ transforms:
            } else {
              # Mark banners/configs as INFO so they aren't labeled UNKNOWN/ERROR
              .level = "INFO"
+           }
+        }
+
+        # --- Postgres (Default Text Format) ---
+        # Format: 2026-01-25 18:42:02.917 CST [30] LOG:  message...
+        if match(.container_name, r'postgres') {
+           pg_parts, regex_err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\s+(?P<tz>\w+)\s+\[(?P<pid>\d+)\]\s+(?P<lvl>\w+):\s+(?P<msg>.*)$')
+           
+           if regex_err == null {
+             .message = pg_parts.msg
+             .postgres_pid = pg_parts.pid
+             .level = upcase!(pg_parts.lvl)
+             
+             # Map Postgres specific levels to standard ones if needed
+             if .level == "LOG" { .level = "INFO" }
+             
+             # Parse timestamp (e.g. 2026-01-25 18:42:02.917)
+             parsed_ts, ts_err = parse_timestamp(pg_parts.ts, "%Y-%m-%d %H:%M:%S.%f")
+             if ts_err == null {
+               .timestamp = parsed_ts
+             }
+
+             # Extract Checkpoint Metrics (buffers, timing, size)
+             # Example msg: "checkpoint complete: wrote 25 buffers ... write=2.508 s ... distance=147 kB ..."
+             # Fix E110 & E651: .message is guaranteed string (from pg_parts.msg), so we don't need '?? ""'
+             msg_str = string(.message) ?? ""
+             if starts_with(msg_str, "checkpoint complete:") {
+                cp, cp_err = parse_regex(msg_str, r'wrote (?P<buffers>\d+) buffers.*write=(?P<write_s>[\d\.]+) s, sync=(?P<sync_s>[\d\.]+) s, total=(?P<total_s>[\d\.]+) s; sync files=(?P<files>\d+).*distance=(?P<dist_kb>\d+) kB, estimate=(?P<est_kb>\d+) kB')
+                if cp_err == null {
+                  .postgres_buffers_written = to_int(cp.buffers) ?? null
+                  .postgres_write_s = to_float(cp.write_s) ?? null
+                  .postgres_sync_s = to_float(cp.sync_s) ?? null
+                  .postgres_total_s = to_float(cp.total_s) ?? null
+                  .postgres_sync_files = to_int(cp.files) ?? null
+                  .postgres_distance_kb = to_int(cp.dist_kb) ?? null
+                  .postgres_estimate_kb = to_int(cp.est_kb) ?? null
+                }
+             }
+           }
+        }
+
+        # --- FerretDB ---
+        # Format: 2026-01-26T02:47:41.631Z	INFO	middleware/dispatcher.go:131	Command handled	{"command":"find",...}
+        if match(.container_name, r'ferretdb') {
+           ferret_parts, regex_err = parse_regex(.message, r'^(?P<ts>\S+)\s+(?P<lvl>\w+)\s+(?P<src>\S+)\s+(?P<msg>.*)\s+(?P<json_context>\{.*\})$')
+           
+           if regex_err == null {
+             .timestamp = parse_timestamp(ferret_parts.ts, "%+") ?? .timestamp
+             .level = ferret_parts.lvl
+             .source_origin = ferret_parts.src
+             .message = ferret_parts.msg
+             
+             # Extract structured context
+             ctx, json_err = parse_json(ferret_parts.json_context)
+             if json_err == null {
+               merged_ferret, merge_err = merge(., ctx)
+               if merge_err == null {
+                 . = merged_ferret
+               }
+             }
            }
         }
       }
@@ -234,8 +312,20 @@ transforms:
 
       # VictoriaLogs Timestamp:
       # Format the final valid .timestamp object into an RFC3339 string field '_time'.
-      # VictoriaLogs uses this field for the actual index time.
-      ._time = format_timestamp!(.timestamp, format: "%+")
+      # We assume .timestamp is a Timestamp object, but if parsing failed earlier, it might still be a String.
+      # We check the type to prevent "expected timestamp, got string" crashes.
+      # Fix: Replaced 'else if' with nested 'else { if ... }' to avoid VRL syntax issues in this context.
+      if is_timestamp(.timestamp) {
+        ._time = format_timestamp!(.timestamp, format: "%+")
+      } else {
+        if is_string(.timestamp) {
+          # If it is a string, pass it raw. VictoriaLogs handles many string formats automatically.
+          ._time = .timestamp
+        } else {
+          # Fallback to capture time if no valid timestamp exists
+          ._time = format_timestamp!(now(), format: "%+")
+        }
+      }
 
 sinks:
   # -------------------------------------------------------------------------
