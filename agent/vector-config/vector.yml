@@ -15,6 +15,20 @@ sources:
     # before Vector tries to parse them, preventing "invalid JSON" errors.
     auto_partial_merge: true
   
+  host_journald:
+    type: "journald"
+    journal_directory: "/var/log/journal"
+
+  host_files:
+    type: "file"
+    include:
+      - "/var/log/**/*.log"
+    exclude:
+      - "/var/log/journal/**/*" # Exclude journald binary files
+      - "/var/log/traefik/**/*" # Exclude if handled separately or via Docker
+      - "/var/log/auth.log"     # Redundant: Covered by host_journald
+      - "/var/log/kern.log"     # Redundant: Covered by host_journald
+  
   # Internal self-monitoring metrics for Vector
   vector_metrics:
     type: internal_metrics
@@ -34,10 +48,10 @@ transforms:
       standard: '!contains(string(.container_name) ?? "", "logrotate")'
 
   # -------------------------------------------------------------------------
-  # 2. Reduction: Logrotate Bundling
+  # 2. Reduction: Multiline Bundling
   # -------------------------------------------------------------------------
-  # This merges the indented lines of logrotate output into the preceding header line.
-  reduce_logrotate:
+  # This merges the indented lines of output into the preceding header line.
+  reduce_multiline:
     type: reduce
     inputs: ["route_multiline.logrotate"]
     # Group by container only (merging stdout/stderr together so banners and details stay coherent)
@@ -55,10 +69,10 @@ transforms:
   # -------------------------------------------------------------------------
   # 3. Processing: Parsing & Normalization (The Main Logic)
   # -------------------------------------------------------------------------
-  process_logs:
+  process_docker:
     type: "remap"
     # Combine the standard stream and the now-reduced logrotate stream
-    inputs: ["route_multiline.standard", "reduce_logrotate"]
+    inputs: ["route_multiline.standard", "reduce_multiline"]
     source: |
       # --- 1. Metadata Cleanup ---
       # Docker container names often come with a leading slash (e.g., "/traefik").
@@ -82,7 +96,7 @@ transforms:
       }
 
       if err == null {
-        # === HAPPY PATH: STRUCTURED LOGS (JSON OR KV) ===
+        # === HAPPY PATH: STRUCTURED LOGS (JSON OR Key-Value) ===
         # Merge the parsed fields to the root of the event.
         merged, merge_err = merge(., structured)
         
@@ -116,7 +130,6 @@ transforms:
           ts_val = null
           ts_field = null
 
-          # Expanded blocks to avoid VRL syntax errors with single-line else-if assignments
           if exists(.ts) { 
             ts_val = .ts
             ts_field = "ts" 
@@ -158,13 +171,17 @@ transforms:
         # If structured parsing failed, we check specific container types and apply Regex.
         
         # --- Socket-Proxy (HAProxy Format) ---
-        # Matches: traefik-socket-proxy, dozzle-socket-proxy, etc.
+        # Format: 10.0.1.2:33317 [06/Feb/2009:12:14:14.655] http-in static/srv1 10/0/30/69/109 200 2750 - - ---- 1/1/1/1/0 0/0 "GET /index.html HTTP/1.1"
         if match(.container_name, r'socket-proxy') {
-          haproxy_parts, regex_err = parse_regex(.message, r'^(?P<client_ip>[a-fA-F0-9:.]+):(?P<client_port>\d+) \[(?P<proxy_ts>[^\]]+)\] (?P<frontend>\S+) (?P<backend>[^/]+)/(?P<server>\S+) (?P<tq>\d+)/(?P<tw>\d+)/(?P<tc>\d+)/(?P<tr>\d+)/(?P<tt>\d+) (?P<status_code>\d+) (?P<bytes>\d+) \S+ \S+ \S+ \S+ \S+ "(?P<method>\w+) (?P<path>\S+) (?P<http_version>[^"]+)"')
-          
+          haproxy_parts, regex_err = parse_regex(.message, r'^(?P<client_ip>[a-fA-F0-9:.]+):(?P<client_port>\d+) \[(?P<proxy_ts>[^\]]+)\] (?P<frontend_name>\S+) (?P<backend_name>[^/]+)/(?P<server_name>\S+) (?P<time_request>\d+)/(?P<time_queue>\d+)/(?P<time_connecting>\d+)/(?P<time_response>\d+)/(?P<time_active>\d+) (?P<status_code>\d+) (?P<bytes_read>\d+) (?P<captured_request_cookie>\S+) (?P<captured_response_cookie>\S+) (?P<termination_state>\S+) (?P<actconn>\d+)/(?P<feconn>\d+)/(?P<beconn>\d+)/(?P<src_conn>\d+)/(?P<retries>\d+) (?P<src_queue>\d+)/(?P<backend_queue>\d+) (?P<captured_headers>[^"]*)"(?P<method>\w+) (?P<path>\S+) (?P<http_version>[^"]+)"[ ]{0,1}(?P<ssl_fields>.*$)')
+
+          if regex_err != null {
+            haproxy_parts, regex_err = parse_regex(.message, r'^(?P<client_ip>[a-fA-F0-9:.]+):(?P<client_port>\d+) \[(?P<proxy_ts>[^\]]+)\] (?P<frontend_name>[^/^]+)/(?P<bind_name>\S+) (?P<error>.*)$')
+          }
+
           if regex_err == null {
             . = merge(., haproxy_parts)
-
+          
             # Parse custom HAProxy timestamp (e.g. 24/Jan/2026:18:10:04.947)
             parsed_ts, ts_err = parse_timestamp(.proxy_ts, "%d/%b/%Y:%H:%M:%S.%f")
             if ts_err == null { .timestamp = parsed_ts }
@@ -203,20 +220,10 @@ transforms:
         # --- cAdvisor (Kubernetes/klog) ---
         # Format: I0125 01:22:10... 1 file.go:220] Message...
         if match(.container_name, r'cadvisor') {
-           klog_parts, regex_err = parse_regex(.message, r'^(?P<level_char>[IWEF])\d{4}\s+\d{2}:\d{2}:\d{2}\.\d{6}\s+\d+\s+(?P<source_origin>[^:]+:\d+)\]\s+(?P<clean_message>.*)$')
-           
-           if regex_err == null {
-             # Map klog single-char levels to full words
-             if klog_parts.level_char == "I" { klog_parts.level = "INFO" }
-             if klog_parts.level_char == "W" { klog_parts.level = "WARN" }
-             if klog_parts.level_char == "E" { klog_parts.level = "ERROR" }
-             if klog_parts.level_char == "F" { klog_parts.level = "FATAL" }
-             
-             .message = klog_parts.clean_message
-             .source_origin = klog_parts.source_origin
-             
-             if exists(klog_parts.level) { .level = klog_parts.level }
-           }
+          klog_parts, klog_err = parse_klog(.message)
+          if klog_err == null {
+            . = merge(., klog_parts)
+          }
         }
 
         # --- Logrotate (Custom Format) ---
@@ -327,13 +334,54 @@ transforms:
         }
       }
 
+  # -------------------------------------------------------------------------
+  # 5. Journald Normalization
+  # -------------------------------------------------------------------------
+  process_journald:
+    type: "remap"
+    inputs: ["host_journald"]
+    source: |
+      # Map Journald fields to match the Sink's expectations (container_name, _time)
+      .container_name = ._SYSTEMD_UNIT || .SYSLOG_IDENTIFIER || "host-system"
+      
+      if is_timestamp(.timestamp) {
+        ._time = format_timestamp!(.timestamp, format: "%+")
+      }
+
+      # Map Syslog Priority to Human Readable Level
+      # 0=Emerg, 1=Alert, 2=Crit, 3=Err, 4=Warning, 5=Notice, 6=Info, 7=Debug
+      p = to_int(.PRIORITY) ?? 6
+      if p <= 3 {
+        .level = "ERROR"
+      } else if p == 4 {
+        .level = "WARN"
+      } else if p == 5 || p == 6 {
+        .level = "INFO"
+      } else {
+        .level = "DEBUG"
+      }
+
+  # -------------------------------------------------------------------------
+  # 6. Host File Normalization
+  # -------------------------------------------------------------------------
+  process_files:
+    type: "remap"
+    inputs: ["host_files"]
+    source: |
+      # Create a stream name from the filename (e.g., /var/log/syslog -> host-syslog)
+      # We use the 'file' metadata key provided by the source
+      path_parts = parse_regex(.file, r'^/var/log/(?P<name>.*)$') ?? {"name": "unknown"}
+      .container_name = "host-" + replace(path_parts.name, "/", "-")
+      
+      ._time = format_timestamp!(now(), format: "%+")
+
 sinks:
   # -------------------------------------------------------------------------
   # Sink: VictoriaLogs (via VLAgent)
   # -------------------------------------------------------------------------
   victorialogs:
     type: "elasticsearch"
-    inputs: ["process_logs"]
+    inputs: ["process_docker", "process_journald", "process_files"]
     endpoints: ["http://vlagent:9429/insert/elasticsearch/"]
     mode: "bulk" # Use Bulk API for performance (compresses many logs into one request)
     api_version: "v8"
@@ -352,7 +400,6 @@ sinks:
         VL-Stream-Fields: "container_name"  # High cardinality field for stream definition
         VL-Time-Field: "_time"              # Use our computed timestamp string
         VL-Msg-Field: "message"             # The field containing the log text
-        User-Agent: "vector-sink"
         AccountID: "0"
         ProjectID: "0"
 
