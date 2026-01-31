@@ -99,7 +99,7 @@ services:
     container_name: ${PROJECT_NAME}-vlagent
     command:
       - "--loggerFormat=json"
-      - '--syslog.listenAddr.tcp=0.0.0.0:8094'
+      #- '--syslog.listenAddr.tcp=0.0.0.0:8094'
       - '--remoteWrite.tmpDataPath=/vlagent'
       - '--remoteWrite.maxDiskUsagePerURL=${VLAGENT_DISK_USAGE:-200MB}'
       - "--remoteWrite.basicAuth.username=${VMAUTH_USER}"
@@ -167,7 +167,7 @@ services:
   vector:
     #<<: [*limits, *restart, *security, *user, *logging]
     <<: [*limits, *restart, *security, *logging]
-    image: docker.io/timberio/vector:${VECTOR_VERSION:-latest-distroless-libc}
+    image: docker.io/timberio/vector:${VECTOR_VERSION:-latest-debian}
     hostname: vector.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vector
     #ports:
@@ -180,11 +180,17 @@ services:
     volumes:
       - ./vector-config/vector.yml:/etc/vector/vector.yaml:ro
       - ${DOCKER_VOLUMES}/${PROJECT_NAME}/vector-data:/var/lib/vector
+      
+      # Volumes for host log collection
+      - /etc/machine-id:/etc/machine-id:ro
+      - /var/log:/var/log:ro
+      - /run/log/journal:/run/log/journal:ro
     labels: ## Komodo Labels
       - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
     networks:
       - socket_proxy
       - backend
+    userns_mode: "host"
     depends_on:
       vlagent:
         condition: service_healthy

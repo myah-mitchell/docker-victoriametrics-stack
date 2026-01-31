@@ -10,11 +10,11 @@ sources:
   # -------------------------------------------------------------------------
   docker_socket:
     type: docker_logs
-    # 'auto_partial_merge' is CRITICAL. Docker often splits long JSON lines 
-    # (like Java stack traces) into 16KB chunks. This setting reassembles them 
+    # 'auto_partial_merge' is CRITICAL. Docker often splits long JSON lines
+    # (like Java stack traces) into 16KB chunks. This setting reassembles them
     # before Vector tries to parse them, preventing "invalid JSON" errors.
     auto_partial_merge: true
-  
+
   host_journald:
     type: "journald"
     journal_directory: "/var/log/journal"
@@ -24,355 +24,337 @@ sources:
     include:
       - "/var/log/**/*.log"
     exclude:
-      - "/var/log/journal/**/*" # Exclude journald binary files
-      - "/var/log/traefik/**/*" # Exclude if handled separately or via Docker
-      - "/var/log/auth.log"     # Redundant: Covered by host_journald
-      - "/var/log/kern.log"     # Redundant: Covered by host_journald
-  
+      - "/var/log/journal/**/*" # Binary; covered by host_journald
+      - "/var/log/traefik/**/*" # Covered via Docker source
+      - "/var/log/auth.log"     # Covered by host_journald
+      - "/var/log/kern.log"     # Covered by host_journald
+
   # Internal self-monitoring metrics for Vector
   vector_metrics:
     type: internal_metrics
 
 transforms:
   # -------------------------------------------------------------------------
-  # 1. Routing: Multiline Handling
+  # Universal Multiline Reduction
   # -------------------------------------------------------------------------
-  # We separate 'logrotate' logs because they contain indented config blocks
-  # that need to be merged into a single log event. All other logs go to 'standard'.
-  route_multiline:
-    type: route
-    inputs: ["docker_socket"]
-    route:
-      # Use 'contains' (string check) instead of 'match' (regex) to avoid VRL syntax errors in one-liners
-      logrotate: 'contains(string(.container_name) ?? "", "logrotate")'
-      standard: '!contains(string(.container_name) ?? "", "logrotate")'
-
-  # -------------------------------------------------------------------------
-  # 2. Reduction: Multiline Bundling
-  # -------------------------------------------------------------------------
-  # This merges the indented lines of output into the preceding header line.
+  # ALL docker container logs pass through this reducer. The rule is simple:
+  # a non-empty line that does NOT start with whitespace begins a new log event.
+  # Lines starting with whitespace (spaces or tabs) are continuation lines and
+  # get merged into the preceding event.
+  #
+  # This universally handles indented continuation patterns from any container:
+  #   - Java/Go stack traces        (tab-indented)
+  #   - Python tracebacks           (space-indented)
+  #   - Logrotate config blocks     (space-indented)
+  #   - Any other indented format
+  #
+  # For single-line log containers, every line triggers starts_when and flushes
+  # the previous event immediately. The only latency is for the very last line
+  # in a burst, which waits up to expire_after_ms before flushing.
   reduce_multiline:
     type: reduce
-    inputs: ["route_multiline.logrotate"]
-    # Group by container only (merging stdout/stderr together so banners and details stay coherent)
+    inputs: ["docker_socket"]
     group_by: ["container_name"]
     merge_strategies:
       message: concat_newline
-    # Logic: Start a new log event ONLY if the line starts with a Number (The Timestamp).
-    # 1. Slice the first character (index 0 to 1).
-    # 2. Add '?? "x"' fallback because slice() crashes on empty strings.
-    # 3. Convert to int. If it's a digit (0-9), it returns a number (truthy for start).
-    # 4. If it's a space, letter, or symbol, it returns null, meaning "merge this line".
-    starts_when: 'is_integer(to_int(slice(string(.message) ?? "", 0, 1) ?? "x") ?? null)'
-    expire_after_ms: 2000 # Flush the buffer if no new lines arrive for 2 seconds
+    starts_when: 'length(string(.message) ?? "") > 0 && !starts_with(string(.message) ?? "", " ") && !starts_with(string(.message) ?? "", "\t")'
+    expire_after_ms: 2000
 
   # -------------------------------------------------------------------------
-  # 3. Processing: Parsing & Normalization (The Main Logic)
+  # Docker Log Processing: Parsing & Normalization
   # -------------------------------------------------------------------------
   process_docker:
     type: "remap"
-    # Combine the standard stream and the now-reduced logrotate stream
-    inputs: ["route_multiline.standard", "reduce_multiline"]
+    inputs: ["reduce_multiline"]
     source: |
-      # --- 1. Metadata Cleanup ---
-      # Docker container names often come with a leading slash (e.g., "/traefik").
-      # We remove it for cleaner querying in VictoriaLogs.
+      # -----------------------------------------------------------------------
+      # 1. Banner Removal
+      # -----------------------------------------------------------------------
+      # Strip logrotate START/END marker banners anywhere in the message.
+      # The (?m) flag makes ^ and $ match per-line, so this strips banners
+      # from both standalone events and banners embedded in multiline blocks.
+      # If nothing remains after stripping, drop the event entirely.
+      .message = replace(string(.message) ?? "", r'(?m)^\s*#{5,}\s*logrotate\s+(START|END)\s*#{5,}\s*\n?', "")
+      .message = strip_whitespace(.message)
+      if .message == "" { abort }
+
+      # -----------------------------------------------------------------------
+      # 2. Metadata Cleanup
+      # -----------------------------------------------------------------------
+      # Docker prepends "/" to container names (e.g., "/traefik"). Remove it.
       .container_name = replace(string(.container_name) ?? "", "/", "")
+      .stream_name = "container-" + .container_name
 
-      # --- 2. Structured Log Parsing ---
-      # First, try to parse the message as JSON.
-      .message = strip_whitespace(string(.message) ?? "")
-      structured, err = parse_json(.message)
 
-      # If JSON fails, try Key-Value (LogFmt). Grafana and many Go apps use this.
-      # CRITICAL: We MUST skip this for containers known to use specific text formats (handled by Regex below).
-      # Otherwise, parse_key_value() aggressively parses text logs (like HAProxy) as boolean keys (e.g. "200": true),
-      # corrupting the log and preventing the Regex fallback from running.
-      if err != null {
-        is_known_text_container = match(.container_name, r'socket-proxy|traefik-kop|cadvisor|logrotate|postgres|ferretdb')
-        if !is_known_text_container {
-           structured, err = parse_key_value(.message)
-        }
-      }
+      # -----------------------------------------------------------------------
+      # 3. Log Parsing
+      # -----------------------------------------------------------------------
+      # Order: JSON → Container-Specific Text Regex → Key-Value (logfmt).
+      #
+      # Why this order? Trying specific text regex BEFORE key-value prevents
+      # parse_key_value from corrupting text logs (e.g., HAProxy lines get
+      # mangled into bogus boolean keys like "200": true). With specific parsers
+      # checked first, no blocklist is needed. The key-value fallback then
+      # cleanly catches all logfmt producers: Grafana, CrowdSec (logfmt mode),
+      # and generic Go/Rust apps.
+      parsed, err = parse_json(.message)
 
       if err == null {
-        # === HAPPY PATH: STRUCTURED LOGS (JSON OR Key-Value) ===
-        # Merge the parsed fields to the root of the event.
-        merged, merge_err = merge(., structured)
-        
-        if merge_err == null {
-          . = merged
-          
-          # A. Message Normalization
-          # Move 'msg', 'log', or 'message' fields to the standard 'message' field
-          if exists(.msg) {
-            .message = .msg
-            del(.msg)
-          } else {
-            if exists(.log) {
-              .message = .log
-              del(.log)
-            }
-          }
+        # === JSON PATH ===
+        # Handles: CrowdSec (default JSON output), Grafana (JSON mode),
+        # most Go/Rust structured logging libraries, etc.
+        merged, merge_err = merge(., parsed)
+        if merge_err == null { . = merged }
 
-          # B. Level Normalization
-          # Scan for common level fields (severity, lvl, log_level).
-          found_levels = compact([.level, .severity, .lvl, .log_level])
-          if length(found_levels) > 0 {
-             raw_level = string(found_levels[0]) ?? "UNKNOWN"
-             # Clean up levels like "\"info\"" (remove quotes) and uppercase them.
-             clean_level = replace(raw_level, "\"", "")
-             .level = upcase(clean_level)
-          }
-
-          # C. Timestamp Normalization
-          # Handle 'ts' (VM), 't' (Grafana), or fix 'timestamp' (Vector).
-          ts_val = null
-          ts_field = null
-
-          if exists(.ts) { 
-            ts_val = .ts
-            ts_field = "ts" 
-          } else {
-            if exists(.t) { 
-              ts_val = .t
-              ts_field = "t" 
-            } else {
-              if is_string(.timestamp) { 
-                ts_val = .timestamp
-                ts_field = "timestamp" 
-              }
-            }
-          }
-
-          if ts_val != null {
-            # Parse ISO8601/RFC3339 format (e.g. 2026-01-25T...)
-            parsed_ts, ts_err = parse_timestamp(ts_val, "%+") 
-            if ts_err == null {
-              .timestamp = parsed_ts
-              # Remove original field to avoid duplication (unless it was .timestamp, which we overwrote)
-              if ts_field != "timestamp" {
-                 del(."{{ts_field}}")
-              }
-            }
-          }
-
-          # D. Safety Check
-          # VictoriaLogs requires 'message' to be a string.
-          if !is_string(.message) {
-            .message = encode_json(.message)
-          }
-        } else {
-          # Log internal error if JSON merge fails (e.g. type conflict)
-          log("Structured Merge failed for " + .container_name + ": " + (string(merge_err) ?? "unknown error"), level: "error")
-        }
       } else {
-        # === FALLBACK PATH: TEXT LOGS (REGEX) ===
-        # If structured parsing failed, we check specific container types and apply Regex.
-        
-        # --- Socket-Proxy (HAProxy Format) ---
-        # Format: 10.0.1.2:33317 [06/Feb/2009:12:14:14.655] http-in static/srv1 10/0/30/69/109 200 2750 - - ---- 1/1/1/1/0 0/0 "GET /index.html HTTP/1.1"
-        if match(.container_name, r'socket-proxy') {
-          haproxy_parts, regex_err = parse_regex(.message, r'^(?P<client_ip>[a-fA-F0-9:.]+):(?P<client_port>\d+) \[(?P<proxy_ts>[^\]]+)\] (?P<frontend_name>\S+) (?P<backend_name>[^/]+)/(?P<server_name>\S+) (?P<time_request>\d+)/(?P<time_queue>\d+)/(?P<time_connecting>\d+)/(?P<time_response>\d+)/(?P<time_active>\d+) (?P<status_code>\d+) (?P<bytes_read>\d+) (?P<captured_request_cookie>\S+) (?P<captured_response_cookie>\S+) (?P<termination_state>\S+) (?P<actconn>\d+)/(?P<feconn>\d+)/(?P<beconn>\d+)/(?P<src_conn>\d+)/(?P<retries>\d+) (?P<src_queue>\d+)/(?P<backend_queue>\d+) (?P<captured_headers>[^"]*)"(?P<method>\w+) (?P<path>\S+) (?P<http_version>[^"]+)"[ ]{0,1}(?P<ssl_fields>.*$)')
+        # === TEXT PATH: Container-Specific Regex Parsers ===
+        # Each parser sets canonical fields (.level, .message, .timestamp)
+        # directly. The parsed_text flag short-circuits remaining checks so
+        # only one parser ever runs per event.
+        parsed_text = false
 
+        # --- Socket-Proxy (HAProxy) ---
+        # Full access log:
+        #   IP:port [dd/Mon/yyyy:HH:MM:SS.mmm] frontend backend/server T/T/T/T/T status bytes ... "METHOD path HTTP/ver"
+        # Error / connection-refused line:
+        #   IP:port [timestamp] frontend/bind error_message
+        if match(.stream_name, r'socket-proxy') {
+          parts, regex_err = parse_regex(.message, r'^(?P<client_ip>[a-fA-F0-9:.]+):(?P<client_port>\d+) \[(?P<proxy_ts>[^\]]+)\] (?P<frontend_name>\S+) (?P<backend_name>[^/]+)/(?P<server_name>\S+) (?P<time_request>\d+)/(?P<time_queue>\d+)/(?P<time_connecting>\d+)/(?P<time_response>\d+)/(?P<time_active>\d+) (?P<status_code>\d+) (?P<bytes_read>\d+) (?P<captured_request_cookie>\S+) (?P<captured_response_cookie>\S+) (?P<termination_state>\S+) (?P<actconn>\d+)/(?P<feconn>\d+)/(?P<beconn>\d+)/(?P<src_conn>\d+)/(?P<retries>\d+) (?P<src_queue>\d+)/(?P<backend_queue>\d+) (?P<captured_headers>[^"]*)"(?P<method>\w+) (?P<path>\S+) (?P<http_version>[^"]+)"[ ]{0,1}(?P<ssl_fields>.*$)')
           if regex_err != null {
-            haproxy_parts, regex_err = parse_regex(.message, r'^(?P<client_ip>[a-fA-F0-9:.]+):(?P<client_port>\d+) \[(?P<proxy_ts>[^\]]+)\] (?P<frontend_name>[^/^]+)/(?P<bind_name>\S+) (?P<error>.*)$')
+            parts, regex_err = parse_regex(.message, r'^(?P<client_ip>[a-fA-F0-9:.]+):(?P<client_port>\d+) \[(?P<proxy_ts>[^\]]+)\] (?P<frontend_name>[^/]+)/(?P<bind_name>\S+) (?P<error>.*)$')
           }
 
           if regex_err == null {
-            . = merge(., haproxy_parts)
-          
-            # Parse custom HAProxy timestamp (e.g. 24/Jan/2026:18:10:04.947)
+            . = merge(., parts)
+            # Parse HAProxy timestamp (dd/Mon/yyyy:HH:MM:SS.mmm) → .timestamp
             parsed_ts, ts_err = parse_timestamp(.proxy_ts, "%d/%b/%Y:%H:%M:%S.%f")
             if ts_err == null { .timestamp = parsed_ts }
-
-            # Infer Level from HTTP Status Code
-            sc = to_int(haproxy_parts.status_code) ?? 200
-            .level = "INFO"
-            if sc >= 400 { .level = "WARN" }
-            if sc >= 500 { .level = "ERROR" }
+            del(.proxy_ts)
+            # Infer level from HTTP status code
+            sc = to_int(.status_code) ?? 200
+            .level = if sc >= 500 { "ERROR" } else if sc >= 400 { "WARN" } else { "INFO" }
           }
+          parsed_text = true
         }
 
-        # --- Traefik-Kop (Pipe Delimited) ---
-        # Format: Time | Status | Duration | IP | Method | Path | UA
-        if match(.container_name, r'traefik-kop') {
-           kop_parts, regex_err = parse_regex(.message, r'^\s*(?P<time>\S+)\s+\|\s+(?P<status>\d+)\s+\|\s+(?P<duration>[^|]+)\s+\|\s+(?P<client_ip>[^|]+)\s+\|\s+(?P<method>[^|]+)\s+\|\s+(?P<path>[^|]+)\s+\|\s+(?P<user_agent>.*)$')
-
-           if regex_err == null {
-             # Clean whitespace around extracted fields
-             kop_parts.duration = strip_whitespace!(kop_parts.duration)
-             kop_parts.client_ip = strip_whitespace!(kop_parts.client_ip)
-             kop_parts.method = strip_whitespace!(kop_parts.method)
-             kop_parts.path = strip_whitespace!(kop_parts.path)
-             kop_parts.user_agent = strip_whitespace!(kop_parts.user_agent)
-
-             . = merge(., kop_parts)
-
-             # Infer Level from Status
-             sc = to_int(kop_parts.status) ?? 200
-             .level = "INFO"
-             if sc >= 400 { .level = "WARN" }
-             if sc >= 500 { .level = "ERROR" }
-           }
+        # --- Traefik-Kop (Pipe-Delimited) ---
+        # Format: Time | Status | Duration | IP | Method | Path | User-Agent
+        if !parsed_text && match(.stream_name, r'traefik-kop') {
+          parts, regex_err = parse_regex(.message, r'^\s*(?P<kop_ts>\S+)\s+\|\s+(?P<status>\d+)\s+\|\s+(?P<duration>[^|]+)\s+\|\s+(?P<client_ip>[^|]+)\s+\|\s+(?P<method>[^|]+)\s+\|\s+(?P<path>[^|]+)\s+\|\s+(?P<user_agent>.*)$')
+          if regex_err == null {
+            # Strip whitespace left over from pipe delimiters
+            parts.duration = strip_whitespace!(parts.duration)
+            parts.client_ip = strip_whitespace!(parts.client_ip)
+            parts.method = strip_whitespace!(parts.method)
+            parts.path = strip_whitespace!(parts.path)
+            parts.user_agent = strip_whitespace!(parts.user_agent)
+            . = merge(., parts)
+            # Parse timestamp → .timestamp
+            parsed_ts, ts_err = parse_timestamp(.kop_ts, "%+")
+            if ts_err == null { .timestamp = parsed_ts }
+            del(.kop_ts)
+            # Infer level from status code
+            sc = to_int(.status) ?? 200
+            .level = if sc >= 500 { "ERROR" } else if sc >= 400 { "WARN" } else { "INFO" }
+          }
+          parsed_text = true
         }
 
-        # --- cAdvisor (Kubernetes/klog) ---
-        # Format: I0125 01:22:10... 1 file.go:220] Message...
-        if match(.container_name, r'cadvisor') {
-          klog_parts, klog_err = parse_klog(.message)
+        # --- cAdvisor (klog) ---
+        # Format: I0125 01:22:10.123456    1 file.go:220] Message...
+        # parse_klog sets .message, .level, .timestamp, .file, .line directly.
+        if !parsed_text && match(.stream_name, r'cadvisor') {
+          parts, klog_err = parse_klog(.message)
           if klog_err == null {
-            . = merge(., klog_parts)
+            . = merge(., parts)
           }
+          parsed_text = true
         }
 
-        # --- Logrotate (Custom Format) ---
+        # --- Logrotate ---
         # Format: 2026-01-24 20:02:32 INFO [script:24] Message...
-        if match(.container_name, r'logrotate') {
-           # Capture using (?s:.*) to allow matching newlines (from reduced multiline logs)
-           lr_parts, regex_err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(?P<lvl>\w+)\s+\[(?P<src>[^\]]+)\]\s+(?P<msg>(?s:.*))$')
-           
-           if regex_err == null {
-             .level = upcase!(lr_parts.lvl)
-             .message = lr_parts.msg
-             .source_origin = lr_parts.src
-             
-             # Parse timestamp (e.g. 2026-01-24 20:02:32)
-             parsed_ts, ts_err = parse_timestamp(lr_parts.ts, "%Y-%m-%d %H:%M:%S")
-             if ts_err == null {
-               .timestamp = parsed_ts
-             }
-           } else {
-             # Mark banners/configs as INFO so they aren't labeled UNKNOWN/ERROR
-             .level = "INFO"
-           }
+        # The (?s:.*) allows the msg capture to span newlines from multiline reduction.
+        if !parsed_text && match(.stream_name, r'logrotate') {
+          parts, regex_err = parse_regex(.message, r'^(?P<lr_ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(?P<lvl>\w+)\s+\[(?P<src>[^\]]+)\]\s+(?P<msg>(?s:.*))$')
+          if regex_err == null {
+            .level = upcase!(parts.lvl)
+            .message = parts.msg
+            .source_origin = parts.src
+            parsed_ts, ts_err = parse_timestamp(parts.lr_ts, "%Y-%m-%d %H:%M:%S")
+            if ts_err == null { .timestamp = parsed_ts }
+          } else {
+            # Unparsed output (e.g., config dump without a timestamp header)
+            .level = "INFO"
+          }
+          parsed_text = true
         }
 
-        # --- Postgres (Default Text Format) ---
+        # --- Postgres ---
         # Format: 2026-01-25 18:42:02.917 CST [30] LOG:  message...
-        if match(.container_name, r'postgres') {
-           pg_parts, regex_err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\s+(?P<tz>\w+)\s+\[(?P<pid>\d+)\]\s+(?P<lvl>\w+):\s+(?P<msg>.*)$')
-           
-           if regex_err == null {
-             .message = pg_parts.msg
-             .postgres_pid = pg_parts.pid
-             .level = upcase!(pg_parts.lvl)
-             
-             # Map Postgres specific levels to standard ones if needed
-             if .level == "LOG" { .level = "INFO" }
-             
-             # Parse timestamp (e.g. 2026-01-25 18:42:02.917)
-             parsed_ts, ts_err = parse_timestamp(pg_parts.ts, "%Y-%m-%d %H:%M:%S.%f")
-             if ts_err == null {
-               .timestamp = parsed_ts
-             }
-
-             # Extract Checkpoint Metrics (buffers, timing, size)
-             # Example msg: "checkpoint complete: wrote 25 buffers ... write=2.508 s ... distance=147 kB ..."
-             # Fix E110 & E651: .message is guaranteed string (from pg_parts.msg), so we don't need '?? ""'
-             msg_str = string(.message) ?? ""
-             if starts_with(msg_str, "checkpoint complete:") {
-                cp, cp_err = parse_regex(msg_str, r'wrote (?P<buffers>\d+) buffers.*write=(?P<write_s>[\d\.]+) s, sync=(?P<sync_s>[\d\.]+) s, total=(?P<total_s>[\d\.]+) s; sync files=(?P<files>\d+).*distance=(?P<dist_kb>\d+) kB, estimate=(?P<est_kb>\d+) kB')
-                if cp_err == null {
-                  .postgres_buffers_written = to_int(cp.buffers) ?? null
-                  .postgres_write_s = to_float(cp.write_s) ?? null
-                  .postgres_sync_s = to_float(cp.sync_s) ?? null
-                  .postgres_total_s = to_float(cp.total_s) ?? null
-                  .postgres_sync_files = to_int(cp.files) ?? null
-                  .postgres_distance_kb = to_int(cp.dist_kb) ?? null
-                  .postgres_estimate_kb = to_int(cp.est_kb) ?? null
-                }
-             }
-           }
+        if !parsed_text && match(.stream_name, r'postgres') {
+          parts, regex_err = parse_regex(.message, r'^(?P<pg_ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\s+(?P<tz>\w+)\s+\[(?P<pid>\d+)\]\s+(?P<lvl>\w+):\s+(?P<msg>.*)$')
+          if regex_err == null {
+            .message = parts.msg
+            .postgres_pid = parts.pid
+            .level = upcase!(parts.lvl)
+            parsed_ts, ts_err = parse_timestamp(parts.pg_ts, "%Y-%m-%d %H:%M:%S.%f")
+            if ts_err == null { .timestamp = parsed_ts }
+            # Extract checkpoint performance metrics
+            if starts_with(string(.message) ?? "", "checkpoint complete:") {
+              cp, cp_err = parse_regex(.message, r'wrote (?P<buffers>\d+) buffers.*write=(?P<write_s>[\d\.]+) s, sync=(?P<sync_s>[\d\.]+) s, total=(?P<total_s>[\d\.]+) s; sync files=(?P<files>\d+).*distance=(?P<dist_kb>\d+) kB, estimate=(?P<est_kb>\d+) kB')
+              if cp_err == null {
+                .postgres_buffers_written = to_int(cp.buffers) ?? null
+                .postgres_write_s = to_float(cp.write_s) ?? null
+                .postgres_sync_s = to_float(cp.sync_s) ?? null
+                .postgres_total_s = to_float(cp.total_s) ?? null
+                .postgres_sync_files = to_int(cp.files) ?? null
+                .postgres_distance_kb = to_int(cp.dist_kb) ?? null
+                .postgres_estimate_kb = to_int(cp.est_kb) ?? null
+              }
+            }
+          }
+          parsed_text = true
         }
 
         # --- FerretDB ---
-        # Format: 2026-01-26T02:47:41.631Z	INFO	middleware/dispatcher.go:131	Command handled	{"command":"find",...}
-        if match(.container_name, r'ferretdb') {
-           ferret_parts, regex_err = parse_regex(.message, r'^(?P<ts>\S+)\s+(?P<lvl>\w+)\s+(?P<src>\S+)\s+(?P<msg>.*)\s+(?P<json_context>\{.*\})$')
-           
-           if regex_err == null {
-             .timestamp = parse_timestamp(ferret_parts.ts, "%+") ?? .timestamp
-             .level = ferret_parts.lvl
-             .source_origin = ferret_parts.src
-             .message = ferret_parts.msg
-             
-             # Extract structured context
-             ctx, json_err = parse_json(ferret_parts.json_context)
-             if json_err == null {
-               merged_ferret, merge_err = merge(., ctx)
-               if merge_err == null {
-                 . = merged_ferret
-               }
-             }
-           }
+        # Format: 2026-01-26T02:47:41.631Z\tINFO\tfile.go:131\tMessage\t{"json":"context"}
+        if !parsed_text && match(.stream_name, r'ferretdb') {
+          parts, regex_err = parse_regex(.message, r'^(?P<ferret_ts>\S+)\s+(?P<lvl>\w+)\s+(?P<src>\S+)\s+(?P<msg>.*)\s+(?P<json_context>\{.*\})$')
+          if regex_err == null {
+            .level = parts.lvl
+            .source_origin = parts.src
+            .message = parts.msg
+            parsed_ts, ts_err = parse_timestamp(parts.ferret_ts, "%+")
+            if ts_err == null { .timestamp = parsed_ts }
+            # Merge the trailing JSON context object into the event
+            ctx, json_err = parse_json(parts.json_context)
+            if json_err == null {
+              merged, merge_err = merge(., ctx)
+              if merge_err == null { . = merged }
+            }
+          }
+          parsed_text = true
+        }
+
+        # --- CrowdSec ---
+        # CrowdSec logs JSON by default (caught above in the JSON path).
+        # In non-JSON configurations it outputs logfmt, which falls through
+        # to the key-value parser below. The "time" field it uses is handled
+        # by the universal timestamp normalization in section 4.
+
+        # === FALLBACK: Key-Value (logfmt) ===
+        # Catches all logfmt-based producers that don't need a specific parser:
+        #   - Grafana      (t=, level=, msg=, logger=, ...)
+        #   - CrowdSec     (logfmt fallback; time=, level=, msg=, ...)
+        #   - Generic Go / Python / Rust apps
+        if !parsed_text {
+          parsed, err = parse_key_value(.message)
+          if err == null {
+            . = merge(., parsed)
+          }
         }
       }
 
-      # --- 4. Final Cleanup ---
-      
-      # Set Default Level: If no logic above found a level, mark as UNKNOWN.
-      # This helps identify new containers that need parsing rules.
-      if !exists(.level) {
+      # -----------------------------------------------------------------------
+      # 4. Universal Field Normalization
+      # -----------------------------------------------------------------------
+      # Runs AFTER all parsing paths. Normalizes whichever field names a parser
+      # or structured format used into the canonical schema. Container-specific
+      # parsers that already set .level / .message / .timestamp directly are
+      # unaffected because each section below guards against overwriting.
+
+      # A. Message: move common aliases → .message
+      if exists(.msg) {
+        .message = .msg
+        del(.msg)
+      } else if exists(.log) && (!exists(.message) || .message == "") {
+        .message = .log
+        del(.log)
+      }
+
+      # B. Level: find the first available level field → .level, then uppercase.
+      #    Only runs if .level is not already set by a parser or the JSON payload.
+      if !exists(.level) || .level == "" {
+        if exists(.severity) { .level = .severity; del(.severity) } else if exists(.lvl) { .level = .lvl; del(.lvl) } else if exists(.log_level) { .level = .log_level; del(.log_level) }
+      }
+      if exists(.level) {
+        .level = upcase(replace(string(.level) ?? "UNKNOWN", "\"", ""))
+        # Map non-standard levels to standard equivalents
+        if .level == "LOG" || .level == "NOTICE" { .level = "INFO" }
+      } else {
         .level = "UNKNOWN"
       }
 
-      # VictoriaLogs Timestamp:
-      # Format the final valid .timestamp object into an RFC3339 string field '_time'.
-      # We assume .timestamp is a Timestamp object, but if parsing failed earlier, it might still be a String.
-      # We check the type to prevent "expected timestamp, got string" crashes.
-      # Fix: Replaced 'else if' with nested 'else { if ... }' to avoid VRL syntax issues in this context.
-      if is_timestamp(.timestamp) {
-        ._time = format_timestamp!(.timestamp, format: "%+")
-      } else {
-        if is_string(.timestamp) {
-          # If it is a string, pass it raw. VictoriaLogs handles many string formats automatically.
-          ._time = .timestamp
-        } else {
-          # Fallback to capture time if no valid timestamp exists
-          ._time = format_timestamp!(now(), format: "%+")
+      # C. Timestamp: find common timestamp fields → parse → .timestamp.
+      #    Skipped entirely if .timestamp is already a Timestamp object (set by
+      #    a container-specific parser, e.g., cAdvisor or HAProxy).
+      #    Field priority: .ts (VictoriaMetrics), .t (Grafana), .time (CrowdSec),
+      #    .created_at (Rails/generic), then .timestamp as a raw string.
+      if !is_timestamp(.timestamp) {
+        if exists(.ts) {
+          parsed_ts, ts_err = parse_timestamp(.ts, "%+")
+          if ts_err == null { .timestamp = parsed_ts }
+          del(.ts)
+        } else if exists(.t) {
+          parsed_ts, ts_err = parse_timestamp(.t, "%+")
+          if ts_err == null { .timestamp = parsed_ts }
+          del(.t)
+        } else if exists(.time) {
+          parsed_ts, ts_err = parse_timestamp(.time, "%+")
+          if ts_err == null { .timestamp = parsed_ts }
+          del(.time)
+        } else if exists(.created_at) {
+          parsed_ts, ts_err = parse_timestamp(.created_at, "%+")
+          if ts_err == null { .timestamp = parsed_ts }
+          del(.created_at)
+        } else if is_string(.timestamp) {
+          parsed_ts, ts_err = parse_timestamp(.timestamp, "%+")
+          if ts_err == null { .timestamp = parsed_ts }
         }
       }
 
+      # D. Safety: VictoriaLogs requires .message to be a string.
+      if !is_string(.message) { .message = encode_json(.message) }
+
+      # -----------------------------------------------------------------------
+      # 5. VictoriaLogs Timestamp (_time)
+      # -----------------------------------------------------------------------
+      if is_timestamp(.timestamp) {
+        ._time = format_timestamp!(.timestamp, format: "%+")
+      } else if is_string(.timestamp) {
+        ._time = .timestamp
+      } else {
+        ._time = format_timestamp!(now(), format: "%+")
+      }
+
   # -------------------------------------------------------------------------
-  # 5. Journald Normalization
+  # Journald Normalization
   # -------------------------------------------------------------------------
   process_journald:
     type: "remap"
     inputs: ["host_journald"]
     source: |
-      # Map Journald fields to match the Sink's expectations (container_name, _time)
-      .container_name = ._SYSTEMD_UNIT || .SYSLOG_IDENTIFIER || "host-system"
-      
+      .stream_name = if ._SYSTEMD_UNIT != null { ._SYSTEMD_UNIT } else if .SYSLOG_IDENTIFIER != null { .SYSLOG_IDENTIFIER } else { "host-system" }
+
       if is_timestamp(.timestamp) {
         ._time = format_timestamp!(.timestamp, format: "%+")
       }
 
-      # Map Syslog Priority to Human Readable Level
+      # Map Syslog Priority → Level
       # 0=Emerg, 1=Alert, 2=Crit, 3=Err, 4=Warning, 5=Notice, 6=Info, 7=Debug
       p = to_int(.PRIORITY) ?? 6
-      if p <= 3 {
-        .level = "ERROR"
-      } else if p == 4 {
-        .level = "WARN"
-      } else if p == 5 || p == 6 {
-        .level = "INFO"
-      } else {
-        .level = "DEBUG"
-      }
+      if p <= 3 { .level = "ERROR" } else if p == 4 { .level = "WARN" } else if p <= 6 { .level = "INFO" } else { .level = "DEBUG" }
 
   # -------------------------------------------------------------------------
-  # 6. Host File Normalization
+  # Host File Normalization
   # -------------------------------------------------------------------------
   process_files:
     type: "remap"
     inputs: ["host_files"]
     source: |
-      # Create a stream name from the filename (e.g., /var/log/syslog -> host-syslog)
-      # We use the 'file' metadata key provided by the source
+      # Derive a stream name from the file path (e.g., /var/log/syslog → host-syslog)
       path_parts = parse_regex(.file, r'^/var/log/(?P<name>.*)$') ?? {"name": "unknown"}
-      .container_name = "host-" + replace(path_parts.name, "/", "-")
-      
+      .stream_name = "host-" + replace(path_parts.name, "/", "-")
       ._time = format_timestamp!(now(), format: "%+")
 
 sinks:
@@ -383,7 +365,7 @@ sinks:
     type: "elasticsearch"
     inputs: ["process_docker", "process_journald", "process_files"]
     endpoints: ["http://vlagent:9429/insert/elasticsearch/"]
-    mode: "bulk" # Use Bulk API for performance (compresses many logs into one request)
+    mode: "bulk"
     api_version: "v8"
     compression: "gzip"
     healthcheck:
@@ -396,10 +378,9 @@ sinks:
 
     request:
       headers:
-        # VL Headers to control indexing behavior
-        VL-Stream-Fields: "container_name"  # High cardinality field for stream definition
-        VL-Time-Field: "_time"              # Use our computed timestamp string
-        VL-Msg-Field: "message"             # The field containing the log text
+        VL-Stream-Fields: "stream_name"
+        VL-Time-Field: "_time"
+        VL-Msg-Field: "message"
         AccountID: "0"
         ProjectID: "0"
 

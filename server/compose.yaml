@@ -104,6 +104,8 @@ services:
       - "--storageDataPath=/storage"
       - "--promscrape.config=/etc/prometheus/prometheus.yml"
       - "--vmalert.proxyURL=http://vmalert:8880"
+      - "--retention.maxDiskSpaceUsageBytes=5GB"
+      - "--retentionPeriod=1y"
     #ports:
     #  - "8428:8428"
     environment:
@@ -149,6 +151,8 @@ services:
     command:
       - "--loggerFormat=json"
       - "--storageDataPath=/vlogs"
+      - "--retention.maxDiskSpaceUsageBytes=5GB"
+      - "--retentionPeriod=1y"
     #ports:
     #  - "9428:9428"
     environment:
@@ -190,6 +194,8 @@ services:
     command:
       - "--loggerFormat=json"
       - "--storageDataPath=/vtraces"
+      - "--retention.maxDiskSpaceUsageBytes=5GB"
+      - "--retentionPeriod=1y"
     #ports:
     #  - "10428:10428"
     environment:
