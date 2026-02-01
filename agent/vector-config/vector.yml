@@ -433,7 +433,7 @@ transforms:
       }
 
       # Stream name
-      .stream_name = "syslog-" + .host
+      .stream_name = "syslog-" + (string(.host) ?? "unknown")
 
       # Timestamp
       ._time = if is_timestamp(.timestamp) { format_timestamp!(.timestamp, format: "%+") } else { format_timestamp!(now(), format: "%+") }
