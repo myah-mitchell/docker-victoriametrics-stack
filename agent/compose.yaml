@@ -170,8 +170,10 @@ services:
     image: docker.io/timberio/vector:${VECTOR_VERSION:-latest-debian}
     hostname: vector.${SERVER_NAME}.${SUB_DOMAIN_NAME}${DOMAIN_NAME}  
     container_name: ${PROJECT_NAME}-vector
-    #ports:
+    ports:
     #  - "8686:8686"
+      - "5140:5140/udp"
+      - "5140:5140/tcp"
     environment:
       <<: [*environment_tz, *environment_user]
       DOCKER_HOST: tcp://${PROJECT_NAME}-socket-proxy:2375
@@ -188,6 +190,7 @@ services:
     labels: ## Komodo Labels
       - "komodo.skip" # Prevent Komodo from stopping with StopAllContainers
     networks:
+      - frontend
       - socket_proxy
       - backend
     userns_mode: "host"

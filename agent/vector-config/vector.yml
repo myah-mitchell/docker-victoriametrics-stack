@@ -29,6 +29,12 @@ sources:
       - "/var/log/auth.log"     # Covered by host_journald
       - "/var/log/kern.log"     # Covered by host_journald
 
+  # Source: Syslog
+  syslog:
+    type: "syslog"
+    address: "0.0.0.0:5140"
+    mode: "udp"
+
   # Internal self-monitoring metrics for Vector
   vector_metrics:
     type: internal_metrics
@@ -357,13 +363,98 @@ transforms:
       .stream_name = "host-" + replace(path_parts.name, "/", "-")
       ._time = format_timestamp!(now(), format: "%+")
 
+  # -------------------------------------------------------------------------
+  # Syslog Normalization
+  # -------------------------------------------------------------------------
+  process_syslog:
+    type: "remap"
+    inputs: ["syslog"]
+    source: |
+      # Extract program[pid]: prefix if present
+      prefix, err = parse_regex(.message, r'^(?P<prog>[^\[:\s]+)(?:\[(?P<pid>\d+)\])?\s*:\s*(?P<msg>(?s:.*))$')
+      if err == null {
+        .program = prefix.prog
+        if prefix.pid != "" { .pid = to_int(prefix.pid) ?? null }
+        .message = prefix.msg
+      }
+
+      msg = string(.message) ?? ""
+
+      # --- Structured format detection (order: JSON, CEF, iptables, key-value) ---
+
+      # Embedded JSON (e.g., stahtd logs)
+      if match(msg, r'\{.*\}$') {
+        m, e = parse_regex(msg, r'^(?P<pre>.*?)\s*(?P<json>\{.*\})$')
+        if e == null {
+          parsed, je = parse_json(m.json)
+          if je == null && is_object(parsed) {
+            . = merge!(., parsed)
+            pre = strip_whitespace(string(m.pre) ?? "")
+            if pre != "" { .message = pre }
+            msg = ""
+          }
+        }
+      }
+
+      # CEF format (pipe-delimited): ver|vendor|product|ver|sig|name|sev|ext
+      if msg != "" && match(msg, r'^\d+\|') {
+        m, e = parse_regex(msg, r'^(?P<ver>\d+)\|(?P<vendor>[^|]*)\|(?P<product>[^|]*)\|[^|]*\|(?P<sig>[^|]*)\|(?P<name>[^|]*)\|(?P<sev>[^|]*)\|(?P<ext>.*)$')
+        if e == null {
+          .cef_vendor = strip_whitespace!(m.vendor)
+          .cef_product = strip_whitespace!(m.product)
+          .cef_sig_id = strip_whitespace!(m.sig)
+          .event_name = strip_whitespace!(m.name)
+          sev = to_int(strip_whitespace!(m.sev)) ?? 0
+          if sev >= 7 { .level = "ERROR" } else if sev >= 4 { .level = "WARN" } else { .level = "INFO" }
+          # Extract msg= from extensions or fall back to event name
+          mm, me = parse_regex(m.ext, r'msg=(?P<msg>.+)$')
+          .message = if me == null { strip_whitespace!(mm.msg) } else { strip_whitespace!(m.name) }
+          msg = ""
+        }
+      }
+
+      # iptables/firewall logs (IN= + PROTO=)
+      if msg != "" && contains(msg, "IN=") && contains(msg, "PROTO=") {
+        # Extract quoted DESCR before key-value parsing
+        dm, de = parse_regex(msg, r'DESCR="(?P<d>[^"]*)"')
+        if de == null {
+          .DESCR = dm.d
+          msg = replace(msg, r'DESCR="[^"]*"\s*', "")
+        }
+        # Convert standalone TCP flags to key=value
+        msg = replace(msg, r'\b(DF|SYN|ACK|RST|FIN|URG|PSH) ', "$$1=true ")
+        .message = msg
+      }
+
+      # Key-value parsing (logfmt) — skip if message looks like prose
+      if msg != "" && match(msg, r'\b\w+=\S') && !contains(msg, "='") && !contains(msg, ";") && !contains(msg, " :: ") && !match(msg, r'\(\):\s') {
+        parsed, e = parse_key_value(.message)
+        if e == null { . = merge(., parsed) }
+      }
+
+      # Stream name
+      .stream_name = "syslog-" + .host
+
+      # Timestamp
+      ._time = if is_timestamp(.timestamp) { format_timestamp!(.timestamp, format: "%+") } else { format_timestamp!(now(), format: "%+") }
+
+      # Level from syslog severity: 0-3=ERROR, 4=WARN, 5-6=INFO, 7=DEBUG
+      sev = to_int(.severity) ?? 6
+      if sev <= 3 { .level = "ERROR" } else if sev == 4 { .level = "WARN" } else if sev <= 6 { .level = "INFO" } else { .level = "DEBUG" }
+
+      # Upgrade level based on message keywords
+      if .level == "INFO" {
+        ml = downcase(string(.message) ?? "")
+        if match(ml, r'\b(fatal|critical|error|panic)\b') { .level = "ERROR" } else if match(ml, r'\bwarn') || contains(ml, "timed out") { .level = "WARN" }
+      }
+
 sinks:
   # -------------------------------------------------------------------------
   # Sink: VictoriaLogs (via VLAgent)
   # -------------------------------------------------------------------------
   victorialogs:
     type: "elasticsearch"
-    inputs: ["process_docker", "process_journald", "process_files"]
+    inputs: ["process_docker", "process_journald", "process_files", "process_syslog"]
     endpoints: ["http://vlagent:9429/insert/elasticsearch/"]
     mode: "bulk"
     api_version: "v8"
